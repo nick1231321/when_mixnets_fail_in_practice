@@ -1,0 +1,23 @@
+[package]
+name = "nym-localnet-self-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nym-self-test"
+path = "src/main.rs"
+
+[dependencies]
+nym-sdk = { path = "../../sdk/rust/nym-sdk" }
+nym-topology = { path = "../../common/topology" }
+nym-bin-common = { path = "../../common/bin-common", features = ["basic_tracing"] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "time"] }
+
+[workspace]
+
+[patch.crates-io]
+nym-coconut-dkg-common = { path = "../../common/cosmwasm-smart-contracts/coconut-dkg" }
+nym-contracts-common = { path = "../../common/cosmwasm-smart-contracts/contracts-common" }
+nym-contracts-common-testing = { path = "../../common/cosmwasm-smart-contracts/contracts-common-testing" }
+nym-group-contract-common = { path = "../../common/cosmwasm-smart-contracts/group-contract" }
+nym-multisig-contract-common = { path = "../../common/cosmwasm-smart-contracts/multisig-contract" }

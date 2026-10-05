@@ -1,0 +1,118 @@
+# Nym localnet on Docker: 9 mixnodes (3 per layer) + 2 gateways sharing one network
+# namespace. Everything announces 127.0.0.1; ports are published to the host from mix1.
+# Layout must match docker/node.sh and docker/build_topology.py.
+x-node: &node
+  image: nym-localnet:latest
+  volumes:
+    - ./data:/localnet
+    - nym-home:/root/.nym
+    - ./docker/node.sh:/usr/local/bin/nym-localnet-node.sh:ro
+    - ./docker/build_topology.py:/usr/local/bin/localnet_topology.py:ro
+  restart: unless-stopped
+
+services:
+  mix1:
+    <<: *node
+    build:
+      context: ..
+      dockerfile: nym-localnet/docker/Dockerfile
+    container_name: nym-mix1
+    command: ["nym-localnet-node.sh", "mix", "mix1", "1"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    ports:
+      - "127.0.0.1:9000-9001:9000-9001"
+      - "127.0.0.1:10001-10011:10001-10011"
+      - "127.0.0.1:20001-20011:20001-20011"
+      - "127.0.0.1:30001-30011:30001-30011"
+
+  mix2:
+    <<: *node
+    container_name: nym-mix2
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix2", "2"]
+
+  mix3:
+    <<: *node
+    container_name: nym-mix3
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix3", "3"]
+
+  mix4:
+    <<: *node
+    container_name: nym-mix4
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix4", "4"]
+
+  mix5:
+    <<: *node
+    container_name: nym-mix5
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix5", "5"]
+
+  mix6:
+    <<: *node
+    container_name: nym-mix6
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix6", "6"]
+
+  mix7:
+    <<: *node
+    container_name: nym-mix7
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix7", "7"]
+
+  mix8:
+    <<: *node
+    container_name: nym-mix8
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix8", "8"]
+
+  mix9:
+    <<: *node
+    container_name: nym-mix9
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    command: ["nym-localnet-node.sh", "mix", "mix9", "9"]
+
+  gateway:
+    <<: *node
+    container_name: nym-gateway
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    command: ["nym-localnet-node.sh", "gateway", "gateway", "10"]
+
+  gateway2:
+    <<: *node
+    container_name: nym-gateway2
+    network_mode: "service:mix1"
+    depends_on: [mix1]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    command: ["nym-localnet-node.sh", "gateway", "gateway2", "11"]
+
+  topology:
+    <<: *node
+    container_name: nym-topology
+    restart: "no"
+    depends_on: [mix1, mix2, mix3, mix4, mix5, mix6, mix7, mix8, mix9, gateway, gateway2]
+    command:
+      - sh
+      - -c
+      - |
+        for f in mix1 mix2 mix3 mix4 mix5 mix6 mix7 mix8 mix9 gateway gateway2; do
+          while [ ! -f /localnet/$$f.json ]; do echo "waiting for $$f.json"; sleep 1; done
+        done
+        [ -f /localnet/network.json ] || python3 /usr/local/bin/localnet_topology.py /localnet
+
+volumes:
+  nym-home:
