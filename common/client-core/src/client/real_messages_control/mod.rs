@@ -27,6 +27,7 @@ use nym_sphinx::acknowledgements::AckKey;
 use nym_sphinx::addressing::clients::Recipient;
 use nym_statistics_common::clients::ClientStatsSender;
 use nym_task::ShutdownToken;
+use nym_topology::PathSelectionStrategy;
 use nym_task::connections::{ConnectionCommandReceiver, LaneQueueLengths};
 use rand::{CryptoRng, Rng};
 use std::sync::Arc;
@@ -57,6 +58,9 @@ pub struct Config {
 
     /// Specifies all reply SURBs related configuration options.
     reply_surbs: config::ReplySurbs,
+
+    /// Strategy used to choose forward routes for packets of each client-destination session.
+    path_selection_strategy: PathSelectionStrategy,
 }
 
 impl<'a> From<&'a Config> for acknowledgement_control::Config {
@@ -95,6 +99,7 @@ impl<'a> From<&'a Config> for message_handler::Config {
         .with_custom_primary_packet_size(cfg.traffic.primary_packet_size)
         .with_custom_secondary_packet_size(cfg.traffic.secondary_packet_size)
         .disable_mix_hops(cfg.traffic.disable_mix_hops)
+        .with_path_selection_strategy(cfg.path_selection_strategy.clone())
     }
 }
 
@@ -111,7 +116,13 @@ impl Config {
             cover_traffic: base_client_debug_config.cover_traffic,
             acks: base_client_debug_config.acknowledgements,
             reply_surbs: base_client_debug_config.reply_surbs,
+            path_selection_strategy: PathSelectionStrategy::Baseline,
         }
+    }
+
+    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
+        self.path_selection_strategy = strategy;
+        self
     }
 }
 

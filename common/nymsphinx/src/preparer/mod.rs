@@ -15,7 +15,8 @@ use nym_sphinx_forwarding::packet::MixPacket;
 use nym_sphinx_params::packet_sizes::PacketSize;
 use nym_sphinx_params::{PacketType, ReplySurbKeyDigestAlgorithm, SphinxKeyRotation};
 use nym_sphinx_types::{Delay, NymPacket};
-use nym_topology::{NymRouteProvider, NymTopologyError};
+use nym_topology::path_selection::{PathSelector, SharedPathSelector};
+use nym_topology::{NymRouteProvider, NymTopologyError, PathSelectionStrategy};
 use rand::{CryptoRng, Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use tracing::*;
@@ -58,6 +59,13 @@ pub trait FragmentPreparer {
     }
 
     fn deterministic_route_selection(&self) -> bool;
+
+    /// Session-aware path selector for forward packets. `None` means every packet gets an
+    /// independent, uniformly random route.
+    fn path_selector(&self) -> Option<&SharedPathSelector> {
+        None
+    }
+
     fn rng(&mut self) -> &mut Self::Rng;
     fn nonce(&self) -> i32;
     fn average_packet_delay(&self) -> Duration;
@@ -233,6 +241,15 @@ pub trait FragmentPreparer {
         trace!("Preparing chunk for sending");
         let route = if self.mix_hops_disabled() {
             topology.empty_route_to_egress(destination)?
+        } else if let Some(selector) = self.path_selector().cloned() {
+            trace!("using session-aware path selection");
+            let mut selector = selector.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            topology.route_to_egress_with_selector(
+                self.rng(),
+                &mut selector,
+                packet_recipient,
+                destination,
+            )?
         } else if self.deterministic_route_selection() {
             trace!("using deterministic route selection");
             let seed = fragment_header.seed().wrapping_mul(self.nonce());
@@ -321,6 +338,10 @@ pub struct MessagePreparer<R> {
     /// through the exit gateway. If mix hops are disabled, traffic will be routed directly
     /// from the entry gateway to the exit gateway, bypassing the mix nodes.
     pub disable_mix_hops: bool,
+
+    /// Session-aware selector of forward routes, shared between all clones of this preparer.
+    /// `None` for the baseline strategy (independent uniform route per packet).
+    path_selector: Option<SharedPathSelector>,
 }
 
 impl<R> MessagePreparer<R>
@@ -345,7 +366,20 @@ where
             average_ack_delay,
             nonce,
             disable_mix_hops,
+            path_selector: None,
         }
+    }
+
+    /// Use the given strategy to choose forward routes for packets of each client-destination session.
+    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
+        self.path_selector = match strategy {
+            PathSelectionStrategy::Baseline => None,
+            strategy => {
+                info!("[path-selection] forward routes will use {strategy:?}");
+                Some(PathSelector::new_shared(strategy))
+            }
+        };
+        self
     }
 
     /// Overwrites existing sender address with the provided value.
@@ -457,6 +491,10 @@ impl<R: CryptoRng + Rng> FragmentPreparer for MessagePreparer<R> {
 
     fn deterministic_route_selection(&self) -> bool {
         self.deterministic_route_selection
+    }
+
+    fn path_selector(&self) -> Option<&SharedPathSelector> {
+        self.path_selector.as_ref()
     }
 
     fn rng(&mut self) -> &mut Self::Rng {

@@ -9609,6 +9609,7 @@ dependencies = [
  "nym-sphinx-types",
  "nym-wasm-utils",
  "rand 0.10.2",
+ "rand_chacha 0.10.0",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

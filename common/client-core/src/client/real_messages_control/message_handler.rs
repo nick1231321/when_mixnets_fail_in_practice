@@ -21,7 +21,7 @@ use nym_sphinx::params::{PacketSize, PacketType};
 use nym_sphinx::preparer::{MessagePreparer, PreparedFragment};
 use nym_task::ShutdownToken;
 use nym_task::connections::TransmissionLane;
-use nym_topology::{NymRouteProvider, NymTopologyError};
+use nym_topology::{NymRouteProvider, NymTopologyError, PathSelectionStrategy};
 use rand::{CryptoRng, Rng};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -119,6 +119,9 @@ pub(crate) struct Config {
 
     /// Optional secondary predefined packet size used for the encapsulated messages.
     secondary_packet_size: Option<PacketSize>,
+
+    /// Strategy used to choose forward routes for packets of each client-destination session.
+    path_selection_strategy: PathSelectionStrategy,
 }
 
 impl Config {
@@ -138,6 +141,7 @@ impl Config {
             primary_packet_size: PacketSize::default(),
             secondary_packet_size: None,
             disable_mix_hops: false,
+            path_selection_strategy: PathSelectionStrategy::Baseline,
         }
     }
 
@@ -156,6 +160,12 @@ impl Config {
     /// Configure whether messages senders using this config should use mix hops or not when sending messages.
     pub fn disable_mix_hops(mut self, disable_mix_hops: bool) -> Self {
         self.disable_mix_hops = disable_mix_hops;
+        self
+    }
+
+    /// Configure the strategy used to choose forward routes for packets of each client-destination session.
+    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
+        self.path_selection_strategy = strategy;
         self
     }
 }
@@ -204,7 +214,8 @@ where
             config.average_packet_delay,
             config.average_ack_delay,
             config.disable_mix_hops,
-        );
+        )
+        .with_path_selection_strategy(config.path_selection_strategy.clone());
         MessageHandler {
             config,
             rng,

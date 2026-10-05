@@ -54,7 +54,7 @@ use nym_statistics_common::clients::ClientStatsSender;
 use nym_statistics_common::generate_client_stats_id;
 use nym_task::ShutdownTracker;
 use nym_task::connections::{ConnectionCommandReceiver, ConnectionCommandSender, LaneQueueLengths};
-use nym_topology::HardcodedTopologyProvider;
+use nym_topology::{HardcodedTopologyProvider, PathSelectionStrategy};
 use nym_topology::provider_trait::TopologyProvider;
 use nym_validator_client::nym_api::NymApiClientExt;
 use nym_validator_client::{UserAgent, nyxd::contract_traits::DkgQueryClient};
@@ -232,6 +232,8 @@ pub struct BaseClientBuilder<C, S: MixnetClientStorage> {
     connection_fd_callback: Option<Arc<dyn Fn(RawFd) + Send + Sync>>,
 
     derivation_material: Option<DerivationMaterial>,
+
+    path_selection_strategy: PathSelectionStrategy,
 }
 
 impl<C, S> BaseClientBuilder<C, S>
@@ -261,7 +263,15 @@ where
             #[cfg(unix)]
             connection_fd_callback: None,
             derivation_material: None,
+            path_selection_strategy: PathSelectionStrategy::Baseline,
         }
+    }
+
+    /// Set the strategy used to choose forward routes for packets of each client-destination session.
+    #[must_use]
+    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
+        self.path_selection_strategy = strategy;
+        self
     }
 
     #[must_use]
@@ -1136,7 +1146,8 @@ where
             &self.config.debug,
             Arc::clone(&ack_key),
             self_address,
-        );
+        )
+        .with_path_selection_strategy(self.path_selection_strategy.clone());
 
         Self::start_real_traffic_controller(
             controller_config,

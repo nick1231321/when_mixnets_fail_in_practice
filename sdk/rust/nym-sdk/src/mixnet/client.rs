@@ -883,7 +883,8 @@ where
                 .with_forget_me(&self.forget_me)
                 .with_remember_me(&self.remember_me)
                 .with_derivation_material(self.derivation_material)
-                .with_nym_api_urls(self.config.network_details.nym_api_urls());
+                .with_nym_api_urls(self.config.network_details.nym_api_urls())
+                .with_path_selection_strategy(self.path_selection_strategy.clone());
 
         if let Some(user_agent) = self.user_agent {
             base_builder = base_builder.with_user_agent(user_agent);

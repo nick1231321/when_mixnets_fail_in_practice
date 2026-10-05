@@ -50,3 +50,7 @@ provider-trait = ["async-trait"]
 wasm-serde-types = ["tsify", "wasm-bindgen", "nym-wasm-utils"]
 persistence = ["serde_json"]
 outfox = []
+
+[dev-dependencies]
+nym-crypto = { workspace = true, features = ["asymmetric", "rand"] }
+rand_chacha = { workspace = true }
