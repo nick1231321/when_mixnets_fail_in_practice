@@ -26,7 +26,7 @@ use nym_client_core::init::{refresh_gateway_published_data, setup_gateway};
 use nym_crypto::hkdf::DerivationMaterial;
 use nym_task::ShutdownTracker;
 use nym_topology::provider_trait::TopologyProvider;
-use nym_topology::RoutingNode;
+use nym_topology::{PathSelectionStrategy, RoutingNode};
 use nym_validator_client::{nyxd, QueryHttpRpcNyxdClient, UserAgent};
 use std::path::Path;
 use std::path::PathBuf;
@@ -105,6 +105,7 @@ pub struct MixnetClientBuilder<S: MixnetClientStorage = Ephemeral> {
     remember_me: RememberMe,
     derivation_material: Option<DerivationMaterial>,
     stream_idle_timeout: Option<std::time::Duration>,
+    path_selection_strategy: PathSelectionStrategy,
 }
 
 impl MixnetClientBuilder<Ephemeral> {
@@ -151,6 +152,7 @@ impl MixnetClientBuilder<OnDiskPersistent> {
             remember_me: Default::default(),
             derivation_material: None,
             stream_idle_timeout: None,
+            path_selection_strategy: Default::default(),
         })
     }
 }
@@ -185,6 +187,7 @@ where
             remember_me: Default::default(),
             derivation_material: None,
             stream_idle_timeout: None,
+            path_selection_strategy: Default::default(),
         }
     }
 
@@ -214,6 +217,7 @@ where
             remember_me: self.remember_me,
             derivation_material: self.derivation_material,
             stream_idle_timeout: self.stream_idle_timeout,
+            path_selection_strategy: self.path_selection_strategy,
         }
     }
 
@@ -251,6 +255,14 @@ where
     #[must_use]
     pub fn with_stream_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.stream_idle_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the strategy used to choose mix routes for packets of a client-destination session.
+    /// Defaults to [`PathSelectionStrategy::Baseline`] (independent uniform route per packet).
+    #[must_use]
+    pub fn path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
+        self.path_selection_strategy = strategy;
         self
     }
 
@@ -442,6 +454,7 @@ where
         client.remember_me = self.remember_me;
         client.derivation_material = self.derivation_material;
         client.stream_idle_timeout = self.stream_idle_timeout;
+        client.path_selection_strategy = self.path_selection_strategy;
         Ok(client)
     }
 }
@@ -517,6 +530,7 @@ where
     derivation_material: Option<DerivationMaterial>,
 
     stream_idle_timeout: Option<std::time::Duration>,
+    path_selection_strategy: PathSelectionStrategy,
 }
 
 impl<S> DisconnectedMixnetClient<S>
@@ -576,6 +590,7 @@ where
             remember_me,
             derivation_material: None,
             stream_idle_timeout: None,
+            path_selection_strategy: Default::default(),
         })
     }
 
@@ -991,6 +1006,7 @@ where
             return Err(Error::Socks5Config { set: true });
         }
         let stream_idle_timeout = self.stream_idle_timeout;
+        let path_selection_strategy = self.path_selection_strategy.clone();
         let (mut started_client, nym_address) = self.connect_to_mixnet_common().await?;
         let client_input = started_client.client_input.register_producer();
         let mut client_output = started_client.client_output.register_consumer();
@@ -1017,6 +1033,7 @@ where
         if let Some(timeout) = stream_idle_timeout {
             client.stream_idle_timeout = timeout;
         }
+        client.path_selection_strategy = path_selection_strategy;
         Ok(client)
     }
 }
@@ -1050,6 +1067,24 @@ impl IncludedSurbs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_selection_strategy_is_passed_to_built_client() {
+        let default_client = MixnetClientBuilder::new_ephemeral().build().unwrap();
+        assert_eq!(
+            default_client.path_selection_strategy,
+            PathSelectionStrategy::Baseline
+        );
+
+        let strategy = PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1, 2],
+        };
+        let client = MixnetClientBuilder::new_ephemeral()
+            .path_selection_strategy(strategy.clone())
+            .build()
+            .unwrap();
+        assert_eq!(client.path_selection_strategy, strategy);
+    }
 
     #[test]
     fn test_mixnet_builder_default_no_custom_client() {

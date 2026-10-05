@@ -23,7 +23,7 @@ use nym_sphinx::{params::PacketType, receiver::ReconstructedMessage};
 use nym_statistics_common::clients::{ClientStatsEvents, ClientStatsSender};
 use nym_task::connections::{ConnectionCommandSender, LaneQueueLengths};
 use nym_task::ShutdownTracker;
-use nym_topology::{NymRouteProvider, NymTopology};
+use nym_topology::{NymRouteProvider, NymTopology, PathSelectionStrategy};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -149,6 +149,9 @@ pub struct MixnetClient {
 
     /// How long a stream can be idle before the router cleans it up.
     pub(crate) stream_idle_timeout: Duration,
+
+    /// Strategy used to choose mix routes for packets of a client-destination session.
+    pub(crate) path_selection_strategy: PathSelectionStrategy,
 }
 
 impl MixnetClient {
@@ -183,6 +186,7 @@ impl MixnetClient {
             #[cfg(feature = "stream")]
             streams: None,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            path_selection_strategy: Default::default(),
         }
     }
 
@@ -211,6 +215,11 @@ impl MixnetClient {
     /// client identity, the client encryption key, and the gateway identity.
     pub fn nym_address(&self) -> &Recipient {
         &self.nym_address
+    }
+
+    /// Get the path selection strategy this client was built with.
+    pub fn path_selection_strategy(&self) -> &PathSelectionStrategy {
+        &self.path_selection_strategy
     }
 
     /// Get a child token of the root, to monitor unexpected shutdown, without causing one
