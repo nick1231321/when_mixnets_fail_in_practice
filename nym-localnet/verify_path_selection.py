@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs the localnet self-test binaries with different path selection configurations and
+"""Runs the localnet self-test (nym-self-test) with different path selection configurations and
 verifies, from their `[path-selection]` debug logs, that every route follows its configuration.
 
 For every run it checks:
@@ -133,18 +133,8 @@ class Strategy:
             return f"khf-{'.'.join(map(str, self.value))}"
         return f"{self.name}-{self.value}"
 
-    def binary_args(self):
-        """Binary and strategy arguments of the dedicated self-test binary."""
-        if self.name == "baseline":
-            return "nym-self-test-baseline", []
-        if self.name == "khf":
-            return "nym-self-test-khf", ["--layers", ",".join(map(str, self.value))]
-        if self.name == "kw":
-            return "nym-self-test-kw", ["--k", str(self.value)]
-        return "nym-self-test-alpha", ["--alpha", str(self.value)]
-
-    def generic_arg(self):
-        """Value of `--strategy` of the generic nym-self-test binary."""
+    def arg(self):
+        """Value of the self-test's `--strategy`."""
         if self.name == "baseline":
             return "baseline"
         if self.name == "khf":
@@ -159,7 +149,6 @@ class Run:
     real_ack: str = "strategy"
     cover: str = "strategy"
     cover_ack: str = "strategy"
-    generic: bool = False
 
     @property
     def routing_config(self):
@@ -167,16 +156,18 @@ class Run:
 
     @property
     def name(self):
-        prefix = "generic-" if self.generic else ""
         routing = "_".join(f"{attr.replace('_', '')}-{getattr(self, attr)[0]}" for attr, _ in CLASSES)
-        return f"{prefix}{self.strategy.label}_{routing}"
+        return f"{self.strategy.label}_{routing}"
 
     def command(self, bin_dir, topology, size):
-        if self.generic:
-            binary, args = "nym-self-test", ["--strategy", self.strategy.generic_arg()]
-        else:
-            binary, args = self.strategy.binary_args()
-        cmd = [str(bin_dir / binary), str(topology), "--size", str(size), *args]
+        cmd = [
+            str(bin_dir / "nym-self-test"),
+            str(topology),
+            "--size",
+            str(size),
+            "--strategy",
+            self.strategy.arg(),
+        ]
         if self.strategy.name != "baseline":
             for attr, flag in CLASSES:
                 cmd += [flag, getattr(self, attr)]
@@ -213,15 +204,6 @@ def build_matrix(quick, combos):
         for value in values:
             for routing in routing_combos(combos):
                 runs.append(Run(Strategy(name, value), **routing))
-    if not quick:
-        # the generic binary parses the same strategies through `--strategy`
-        for strategy in (
-            Strategy("baseline"),
-            Strategy("khf", [1, 2]),
-            Strategy("kw", 2),
-            Strategy("alpha", 0.8),
-        ):
-            runs.append(Run(strategy, generic=True))
     return runs
 
 

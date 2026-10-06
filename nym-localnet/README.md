@@ -1,7 +1,7 @@
 # Nym localnet: path selection self-tests
 
-A Docker-based local mixnet (9 mixnodes in 3 layers, 2 gateways) plus self-test clients that
-send a message to themselves through it. The clients use one of the path selection strategies
+A Docker-based local mixnet (9 mixnodes in 3 layers, 2 gateways) plus a self-test client that
+sends a message to itself through it. The client uses one of the path selection strategies
 from *"When Mixnets Fail: Evaluating, Quantifying, and Mitigating the Impact of Adversarial
 Nodes in Mix Networks"* (Rahimi, NDSS 2026). A verification script checks from the logs that
 every route follows the configuration.
@@ -19,7 +19,7 @@ cd nym-localnet
 ./localnet.sh up                                      # start the nodes, write data/network.json
 cargo build --release --manifest-path self-test/Cargo.toml
 
-./self-test/target/release/nym-self-test-khf data/network.json --layers 1,2
+./self-test/target/release/nym-self-test data/network.json --strategy khf:1,2
 ./localnet.sh verify --quick                          # check the routing of every strategy
 ```
 
@@ -38,25 +38,27 @@ Path selection is implemented in the client only. After changing it, rebuild the
 The `topology` container rewrites `data/network.json` whenever the nodes rotate their sphinx
 keys, and the self-test reloads it on every topology refresh.
 
-## Self-test binaries
+## The self-test
 
-All binaries live in `self-test/target/release/`. Each connects an ephemeral client, sends one
-message to its own address and waits up to 60 s for it to come back. It prints `SUCCESS` (exit
-code 0) or `FAILURE` (exit code 1).
+`self-test/target/release/nym-self-test` connects an ephemeral client, sends one message to its
+own address and waits up to 60 s for it to come back. It prints `SUCCESS` (exit code 0) or
+`FAILURE` (exit code 1).
 
-| Binary | Strategy | Strategy argument |
-|---|---|---|
-| `nym-self-test-baseline` | Baseline: an independent, uniformly random route per packet (Nym's default) | none |
-| `nym-self-test-khf` | K-Hops Fixed: the nodes on the given layers are picked once per session and reused | `--layers LAYERS`, comma-separated 1–3, e.g. `1,2` (default `1`) |
-| `nym-self-test-kw` | K/W: K nodes per layer are preselected per session, and every packet picks among them | `--k K`, a positive integer (default 2) |
-| `nym-self-test-alpha` | α-Sticky Selection: with probability α a packet reuses a route already used in the session | `--alpha ALPHA`, in [0, 1] (default 0.8) |
-| `nym-self-test` | Chosen on the command line | `--strategy baseline \| khf:1,2 \| kw:10 \| alpha:0.8` (default `baseline`) |
+`--strategy` picks the path selection strategy:
 
-### Common arguments
+| `--strategy` | Strategy |
+|---|---|
+| `baseline` (default) | Baseline: an independent, uniformly random route per packet (Nym's default). |
+| `khf:LAYERS`, e.g. `khf:1` or `khf:1,2` | K-Hops Fixed: the nodes on the given layers (comma-separated, 1–3) are picked once per session and reused by every packet; the other layers are picked per packet. |
+| `kw:K`, e.g. `kw:2` | K/W: K nodes per layer are preselected per session, and every packet picks among them. |
+| `alpha:ALPHA`, e.g. `alpha:0.8` | α-Sticky Selection: with probability α (in [0, 1]) a packet reuses a route already used in the session, otherwise it gets a new one. |
+
+### Arguments
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `[network.json]` | `data/network.json` | Topology file (positional). |
+| `--strategy STRATEGY` | `baseline` | Path selection strategy, see above. |
 | `--size BYTES` | a short greeting | Message size. A sphinx packet carries ~2 KB, so `--size 100000` spreads the message over ~50 packets of the session. |
 | `--real-routing R` | `strategy` | Routing of real traffic. |
 | `--real-ack-routing R` | `strategy` | Routing of the acks of real traffic. |
@@ -97,21 +99,21 @@ Notes:
 cd nym-localnet
 BIN=./self-test/target/release
 
-# K-HF on layers 1 and 2 for every packet (all defaults)
-$BIN/nym-self-test-khf data/network.json --layers 1,2
+# K-HF on layers 1 and 2 for every packet (all routing defaults)
+$BIN/nym-self-test data/network.json --strategy khf:1,2
 
 # the strategy only on real traffic; acks and cover traffic random as in plain Nym
-$BIN/nym-self-test-khf data/network.json --layers 1,2 \
+$BIN/nym-self-test data/network.json --strategy khf:1,2 \
   --real-ack-routing baseline --cover-routing baseline --cover-ack-routing baseline
 
 # the strategy only on cover traffic and its acks
-$BIN/nym-self-test-kw data/network.json --k 2 --real-routing baseline --real-ack-routing baseline
+$BIN/nym-self-test data/network.json --strategy kw:2 --real-routing baseline --real-ack-routing baseline
 
 # α-SS, ~50 data packets, cover acks random
-$BIN/nym-self-test-alpha data/network.json --alpha 0.5 --size 100000 --cover-ack-routing baseline
+$BIN/nym-self-test data/network.json --strategy alpha:0.5 --size 100000 --cover-ack-routing baseline
 
-# the generic binary takes the same flags
-$BIN/nym-self-test data/network.json --strategy khf:1,2 --real-ack-routing baseline
+# unmodified Nym routing
+$BIN/nym-self-test data/network.json
 ```
 
 In the SDK, the same settings are builder methods:
@@ -140,7 +142,7 @@ Routing: real: strategy, real-ack: baseline, cover: strategy, cover-ack: strateg
 To see every chosen route, enable debug logging for the path selection:
 
 ```sh
-RUST_LOG=warn,nym_topology::path_selection=debug $BIN/nym-self-test-khf data/network.json --layers 1,2
+RUST_LOG=warn,nym_topology::path_selection=debug $BIN/nym-self-test data/network.json --strategy khf:1,2
 ```
 
 | Message | Meaning |
@@ -156,14 +158,14 @@ To follow one class: `... 2>&1 | grep "(cover-ack)"`.
 
 ## Verifying the routing
 
-`verify_path_selection.py` (or `./localnet.sh verify`) runs the binaries with many
+`verify_path_selection.py` (or `./localnet.sh verify`) runs the self-test with many
 configurations and checks every route in their debug logs. It needs only Python 3, the
 localnet up and the self-test built in release mode (`--build` builds it first).
 
 ```sh
 ./localnet.sh verify --quick              # one parameter per strategy, 19 runs (~2 min)
-./localnet.sh verify                      # every parameter, 65 runs
-./localnet.sh verify --combos all         # all 16 routing configs per parameter, 165 runs
+./localnet.sh verify                      # every parameter, 61 runs
+./localnet.sh verify --combos all         # all 16 routing configs per parameter, 161 runs
 ./localnet.sh verify --only khf-1.2       # runs whose name contains "khf-1.2"
 ./localnet.sh verify --list               # print the runs and their command lines
 ./localnet.sh verify --quick -v           # also print every passed check

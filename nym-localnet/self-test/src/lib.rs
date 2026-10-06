@@ -1,12 +1,15 @@
-//! Localnet smoke test shared by the self-test binaries: connect an ephemeral client to the
+//! Localnet smoke test behind the `nym-self-test` binary: connect an ephemeral client to the
 //! local mixnet using the generated topology file, send a message to ourselves and wait for
 //! it to come back through gateway -> mix1 -> mix2 -> mix3 -> gateway.
 //!
-//! Every binary accepts:
-//!   [path/to/network.json]   topology file (default: data/network.json)
-//!   --size BYTES             size of the message sent to ourselves (default: a short
-//!                            greeting). Each sphinx packet carries ~2 KB, so e.g. 100000
-//!                            spreads the message over ~50 packets of the same session.
+//! Arguments:
+//!   [path/to/network.json]       topology file (default: data/network.json)
+//!   --strategy STRATEGY          path selection strategy (see "When Mixnets Fail", NDSS 2026):
+//!                                `baseline` (default), `khf:LAYERS` (e.g. `khf:1,2`),
+//!                                `kw:K` (e.g. `kw:2`) or `alpha:ALPHA` (e.g. `alpha:0.8`)
+//!   --size BYTES                 size of the message sent to ourselves (default: a short
+//!                                greeting). Each sphinx packet carries ~2 KB, so e.g. 100000
+//!                                spreads the message over ~50 packets of the same session.
 //!   --real-routing ROUTING       real traffic: forward data packets and their reply SURBs
 //!   --real-ack-routing ROUTING   SURB-ACKs of real data packets
 //!   --cover-routing ROUTING      loop cover packets
@@ -14,11 +17,9 @@
 //!                                ROUTING is `strategy` (default) or `baseline` (uniformly
 //!                                random route, leaving the session untouched)
 //!
-//! plus the parameter of its path selection strategy (see "When Mixnets Fail", NDSS 2026).
-//!
 //! Path selection decisions are logged under `nym_topology::path_selection`: new sessions at
 //! info level (shown by default) and every chosen route at debug level, e.g.
-//!   RUST_LOG=warn,nym_topology::path_selection=debug nym-self-test-khf --layers 1,2
+//!   RUST_LOG=warn,nym_topology::path_selection=debug nym-self-test --strategy khf:1,2
 
 use nym_sdk::mixnet::{self, MixnetMessageSender, PathSelectionStrategy, Routing, RoutingConfig};
 use nym_topology::provider_trait::{async_trait, TopologyProvider};
@@ -29,9 +30,6 @@ use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_LOG_FILTER: &str = "warn,nym_topology::path_selection=info,nym_sphinx::preparer=info";
-
-/// Builds the strategy from the value of the binary's strategy flag (`None` if not given).
-pub type StrategyFromArg = fn(Option<&str>) -> Result<PathSelectionStrategy, String>;
 
 /// Re-reads the topology file on every refresh, so the client picks up the new sphinx keys
 /// that the localnet writes after each key rotation.
@@ -64,28 +62,20 @@ impl TopologyProvider for FileTopologyProvider {
 
 struct Args {
     topology_path: String,
-    strategy_arg: Option<String>,
+    strategy: PathSelectionStrategy,
     message_size: Option<usize>,
     routing_config: RoutingConfig,
 }
 
-/// Entry point of a self-test binary. `strategy_flag` is the command line flag carrying the
-/// strategy parameter (e.g. `--k`), if the strategy has one.
-pub fn run(strategy_flag: Option<&str>, strategy_from_arg: StrategyFromArg) -> ExitCode {
+/// Entry point of the `nym-self-test` binary.
+pub fn run() -> ExitCode {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", DEFAULT_LOG_FILTER);
     }
     nym_bin_common::logging::setup_tracing_logger();
 
-    let args = match parse_args(std::env::args().skip(1), strategy_flag) {
+    let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let strategy = match strategy_from_arg(args.strategy_arg.as_deref()) {
-        Ok(strategy) => strategy,
         Err(err) => {
             eprintln!("{err}");
             return ExitCode::FAILURE;
@@ -96,7 +86,7 @@ pub fn run(strategy_flag: Option<&str>, strategy_from_arg: StrategyFromArg) -> E
         .expect("failed to start the tokio runtime")
         .block_on(self_test(
             args.topology_path,
-            strategy,
+            args.strategy,
             args.routing_config,
             args.message_size,
         ))
@@ -185,20 +175,18 @@ async fn self_test(
     }
 }
 
-fn parse_args(
-    mut args: impl Iterator<Item = String>,
-    strategy_flag: Option<&str>,
-) -> Result<Args, String> {
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut parsed = Args {
         topology_path: "data/network.json".to_string(),
-        strategy_arg: None,
+        strategy: PathSelectionStrategy::Baseline,
         message_size: None,
         routing_config: RoutingConfig::default(),
     };
 
     while let Some(arg) = args.next() {
-        if Some(arg.as_str()) == strategy_flag {
-            parsed.strategy_arg = Some(args.next().ok_or(format!("{arg} requires a value"))?);
+        if arg == "--strategy" {
+            let value = args.next().ok_or("--strategy requires a value")?;
+            parsed.strategy = parse_strategy(&value)?;
         } else if arg == "--size" {
             let value = args.next().ok_or("--size requires a value")?;
             match value.parse() {
@@ -229,7 +217,7 @@ fn routing_flag<'a>(config: &'a mut RoutingConfig, flag: &str) -> Option<&'a mut
 }
 
 /// K-HF: comma-separated mix layers (1-3) whose node is fixed for the session, e.g. `1,2`.
-pub fn khf(layers: &str) -> Result<PathSelectionStrategy, String> {
+fn khf(layers: &str) -> Result<PathSelectionStrategy, String> {
     let fixed_layers = layers
         .split(',')
         .map(|layer| match layer.parse() {
@@ -243,7 +231,7 @@ pub fn khf(layers: &str) -> Result<PathSelectionStrategy, String> {
 }
 
 /// K/W: number of nodes preselected per layer for the session.
-pub fn kw(k: &str) -> Result<PathSelectionStrategy, String> {
+fn kw(k: &str) -> Result<PathSelectionStrategy, String> {
     match k.parse() {
         Ok(k) if k > 0 => Ok(PathSelectionStrategy::KOverW { k }),
         _ => Err(format!("invalid K '{k}' (expected a positive integer)")),
@@ -251,7 +239,7 @@ pub fn kw(k: &str) -> Result<PathSelectionStrategy, String> {
 }
 
 /// α-SS: probability of reusing a route already assigned in the session.
-pub fn alpha(alpha: &str) -> Result<PathSelectionStrategy, String> {
+fn alpha(alpha: &str) -> Result<PathSelectionStrategy, String> {
     match alpha.parse() {
         Ok(a) if (0.0..=1.0).contains(&a) => Ok(PathSelectionStrategy::AlphaSticky { alpha: a }),
         _ => Err(format!(
@@ -261,7 +249,7 @@ pub fn alpha(alpha: &str) -> Result<PathSelectionStrategy, String> {
 }
 
 /// Parses `baseline`, `khf:<layers>`, `kw:<k>` or `alpha:<alpha>`.
-pub fn any_strategy(value: &str) -> Result<PathSelectionStrategy, String> {
+fn parse_strategy(value: &str) -> Result<PathSelectionStrategy, String> {
     match value.split_once(':').unwrap_or((value, "")) {
         ("baseline", "") => Ok(PathSelectionStrategy::Baseline),
         ("khf", layers) => khf(layers),
@@ -276,12 +264,41 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
-        parse_args(args.iter().map(|arg| arg.to_string()), Some("--layers"))
+        parse_args(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn strategy_defaults_to_baseline() {
+        let args = parse(&[]).unwrap();
+        assert_eq!(args.strategy, PathSelectionStrategy::Baseline);
+        assert_eq!(args.topology_path, "data/network.json");
+    }
+
+    #[test]
+    fn strategies_are_parsed() {
+        let strategy = |value| parse(&["--strategy", value]).map(|args| args.strategy);
+        assert_eq!(strategy("baseline"), Ok(PathSelectionStrategy::Baseline));
+        assert_eq!(
+            strategy("khf:1,2"),
+            Ok(PathSelectionStrategy::KHopsFixed {
+                fixed_layers: vec![1, 2]
+            })
+        );
+        assert_eq!(strategy("kw:2"), Ok(PathSelectionStrategy::KOverW { k: 2 }));
+        assert_eq!(
+            strategy("alpha:0.5"),
+            Ok(PathSelectionStrategy::AlphaSticky { alpha: 0.5 })
+        );
+        for invalid in ["khf:4", "khf:", "kw:0", "alpha:1.5", "alpha", "random"] {
+            assert!(strategy(invalid).is_err(), "{invalid}");
+        }
+        // the flags of the removed per-strategy binaries
+        assert!(parse(&["--layers", "1,2"]).is_err());
     }
 
     #[test]
     fn routing_flags_default_to_the_strategy() {
-        let args = parse(&["--layers", "1,2"]).unwrap();
+        let args = parse(&["--strategy", "khf:1,2"]).unwrap();
         assert_eq!(args.routing_config, RoutingConfig::default());
     }
 
