@@ -7,6 +7,10 @@
 //!   --size BYTES             size of the message sent to ourselves (default: a short
 //!                            greeting). Each sphinx packet carries ~2 KB, so e.g. 100000
 //!                            spreads the message over ~50 packets of the same session.
+//!   --ack-routing ROUTING    routes of the SURB-ACKs of data packets: `strategy` (default,
+//!                            same session as the data) or `baseline` (uniformly random)
+//!   --cover-routing ROUTING  routes of loop cover packets and their SURB-ACKs: `strategy`
+//!                            (default, session of our own address) or `baseline`
 //!
 //! plus the parameter of its path selection strategy (see "When Mixnets Fail", NDSS 2026).
 //!
@@ -14,8 +18,10 @@
 //! info level (shown by default) and every chosen route at debug level, e.g.
 //!   RUST_LOG=warn,nym_topology::path_selection=debug nym-self-test-khf --layers 1,2
 
-use nym_sdk::mixnet::{self, MixnetMessageSender, PathSelectionStrategy};
-use nym_topology::HardcodedTopologyProvider;
+use nym_sdk::mixnet::{self, AuxiliaryRoutes, MixnetMessageSender, PathSelectionStrategy};
+use nym_topology::provider_trait::{async_trait, TopologyProvider};
+use nym_topology::NymTopology;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -25,10 +31,40 @@ const DEFAULT_LOG_FILTER: &str = "warn,nym_topology::path_selection=info,nym_sph
 /// Builds the strategy from the value of the binary's strategy flag (`None` if not given).
 pub type StrategyFromArg = fn(Option<&str>) -> Result<PathSelectionStrategy, String>;
 
+/// Re-reads the topology file on every refresh, so the client picks up the new sphinx keys
+/// that the localnet writes after each key rotation.
+struct FileTopologyProvider {
+    path: PathBuf,
+    last_good: NymTopology,
+}
+
+impl FileTopologyProvider {
+    fn new(path: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let path = path.into();
+        let last_good = NymTopology::new_from_file(&path)?;
+        Ok(FileTopologyProvider { path, last_good })
+    }
+}
+
+#[async_trait]
+impl TopologyProvider for FileTopologyProvider {
+    async fn get_new_topology(&mut self) -> Option<NymTopology> {
+        match NymTopology::new_from_file(&self.path) {
+            Ok(topology) => self.last_good = topology,
+            Err(err) => eprintln!(
+                "failed to reload topology from '{}', keeping the previous one: {err}",
+                self.path.display()
+            ),
+        }
+        Some(self.last_good.clone())
+    }
+}
+
 struct Args {
     topology_path: String,
     strategy_arg: Option<String>,
     message_size: Option<usize>,
+    auxiliary_routes: AuxiliaryRoutes,
 }
 
 /// Entry point of a self-test binary. `strategy_flag` is the command line flag carrying the
@@ -56,15 +92,21 @@ pub fn run(strategy_flag: Option<&str>, strategy_from_arg: StrategyFromArg) -> E
 
     tokio::runtime::Runtime::new()
         .expect("failed to start the tokio runtime")
-        .block_on(self_test(args.topology_path, strategy, args.message_size))
+        .block_on(self_test(
+            args.topology_path,
+            strategy,
+            args.auxiliary_routes,
+            args.message_size,
+        ))
 }
 
 async fn self_test(
     topology_path: String,
     strategy: PathSelectionStrategy,
+    auxiliary_routes: AuxiliaryRoutes,
     message_size: Option<usize>,
 ) -> ExitCode {
-    let provider = match HardcodedTopologyProvider::new_from_file(&topology_path) {
+    let provider = match FileTopologyProvider::new(&topology_path) {
         Ok(provider) => provider,
         Err(err) => {
             eprintln!("failed to load topology from '{topology_path}': {err}");
@@ -75,6 +117,8 @@ async fn self_test(
     let mut client = match mixnet::MixnetClientBuilder::new_ephemeral()
         .custom_topology_provider(Box::new(provider))
         .path_selection_strategy(strategy)
+        .ack_routing(auxiliary_routes.ack)
+        .cover_routing(auxiliary_routes.cover)
         .build()
         .expect("failed to build client")
         .connect_to_mixnet()
@@ -92,6 +136,11 @@ async fn self_test(
     println!(
         "Path selection strategy: {:?}",
         client.path_selection_strategy()
+    );
+    let routes = client.auxiliary_routes();
+    println!(
+        "Ack routing: {:?}, cover routing: {:?}",
+        routes.ack, routes.cover
     );
 
     let greeting = format!("hello from the localnet self-test @ {:?}", Instant::now());
@@ -144,6 +193,7 @@ fn parse_args(
         topology_path: "data/network.json".to_string(),
         strategy_arg: None,
         message_size: None,
+        auxiliary_routes: AuxiliaryRoutes::default(),
     };
 
     while let Some(arg) = args.next() {
@@ -155,6 +205,12 @@ fn parse_args(
                 Ok(size) if size > 0 => parsed.message_size = Some(size),
                 _ => return Err(format!("invalid size '{value}'")),
             }
+        } else if arg == "--ack-routing" {
+            let value = args.next().ok_or("--ack-routing requires a value")?;
+            parsed.auxiliary_routes.ack = value.parse()?;
+        } else if arg == "--cover-routing" {
+            let value = args.next().ok_or("--cover-routing requires a value")?;
+            parsed.auxiliary_routes.cover = value.parse()?;
         } else if arg.starts_with("--") {
             return Err(format!("unknown option '{arg}'"));
         } else {
@@ -170,7 +226,9 @@ pub fn khf(layers: &str) -> Result<PathSelectionStrategy, String> {
         .split(',')
         .map(|layer| match layer.parse() {
             Ok(layer @ 1..=3) => Ok(layer),
-            _ => Err(format!("invalid layer '{layer}' in '{layers}' (expected 1-3)")),
+            _ => Err(format!(
+                "invalid layer '{layer}' in '{layers}' (expected 1-3)"
+            )),
         })
         .collect::<Result<_, _>>()?;
     Ok(PathSelectionStrategy::KHopsFixed { fixed_layers })
@@ -188,7 +246,9 @@ pub fn kw(k: &str) -> Result<PathSelectionStrategy, String> {
 pub fn alpha(alpha: &str) -> Result<PathSelectionStrategy, String> {
     match alpha.parse() {
         Ok(a) if (0.0..=1.0).contains(&a) => Ok(PathSelectionStrategy::AlphaSticky { alpha: a }),
-        _ => Err(format!("invalid alpha '{alpha}' (expected a value in [0, 1])")),
+        _ => Err(format!(
+            "invalid alpha '{alpha}' (expected a value in [0, 1])"
+        )),
     }
 }
 
@@ -200,5 +260,41 @@ pub fn any_strategy(value: &str) -> Result<PathSelectionStrategy, String> {
         ("kw", k) => kw(k),
         ("alpha", a) => alpha(a),
         _ => Err(format!("invalid strategy '{value}'")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nym_sdk::mixnet::AuxiliaryRouting;
+
+    fn parse(args: &[&str]) -> Result<Args, String> {
+        parse_args(args.iter().map(|arg| arg.to_string()), Some("--layers"))
+    }
+
+    #[test]
+    fn routing_flags_default_to_the_strategy() {
+        let args = parse(&["--layers", "1,2"]).unwrap();
+        assert_eq!(args.auxiliary_routes, AuxiliaryRoutes::default());
+    }
+
+    #[test]
+    fn routing_flags_are_parsed() {
+        let args = parse(&["--ack-routing", "baseline", "--cover-routing", "strategy"]).unwrap();
+        assert_eq!(args.auxiliary_routes.ack, AuxiliaryRouting::Baseline);
+        assert_eq!(
+            args.auxiliary_routes.cover,
+            AuxiliaryRouting::FollowStrategy
+        );
+
+        let args = parse(&["--cover-routing", "baseline"]).unwrap();
+        assert_eq!(args.auxiliary_routes.ack, AuxiliaryRouting::FollowStrategy);
+        assert_eq!(args.auxiliary_routes.cover, AuxiliaryRouting::Baseline);
+    }
+
+    #[test]
+    fn invalid_routing_is_rejected() {
+        assert!(parse(&["--ack-routing", "random"]).is_err());
+        assert!(parse(&["--cover-routing"]).is_err());
     }
 }

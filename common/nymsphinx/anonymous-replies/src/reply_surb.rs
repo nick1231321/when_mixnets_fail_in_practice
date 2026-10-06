@@ -10,8 +10,8 @@ use nym_sphinx_addressing::nodes::{
 use nym_sphinx_params::packet_sizes::PacketSize;
 use nym_sphinx_params::{PacketType, ReplySurbKeyDigestAlgorithm, SphinxKeyRotation};
 use nym_sphinx_types::{
-    HEADER_SIZE, NODE_ADDRESS_LENGTH, NymPacket, PAYLOAD_KEYS_SEEDS_VERSION, SURB, SURBMaterial,
-    SphinxError,
+    HEADER_SIZE, NODE_ADDRESS_LENGTH, Node as SphinxNode, NymPacket, PAYLOAD_KEYS_SEEDS_VERSION,
+    SURB, SURBMaterial, SphinxError,
 };
 use nym_topology::{NymRouteProvider, NymTopologyError};
 use rand::CryptoRng;
@@ -75,6 +75,25 @@ impl ReplySurb {
         } else {
             topology.random_route_to_egress(rng, recipient.gateway())?
         };
+        Ok(Self::construct_with_route(
+            rng,
+            recipient,
+            average_delay,
+            route,
+        ))
+    }
+
+    /// Construct a ReplySurb object over the given `route`, which must end at the gateway of
+    /// `recipient`.
+    pub fn construct_with_route<R>(
+        rng: &mut R,
+        recipient: &Recipient,
+        average_delay: Duration,
+        route: Vec<SphinxNode>,
+    ) -> Self
+    where
+        R: CryptoRng,
+    {
         let delays = nym_sphinx_routing::generate_hop_delays(average_delay, route.len());
         let destination = recipient.as_sphinx_destination();
 
@@ -82,11 +101,11 @@ impl ReplySurb {
             SURBMaterial::new(route, delays, destination, PAYLOAD_KEYS_SEEDS_VERSION);
 
         // this can't fail as we know we have a valid route to gateway and have correct number of delays
-        Ok(ReplySurb {
+        ReplySurb {
             surb: surb_material.construct_SURB().unwrap(),
             encryption_key: SurbEncryptionKey::new(rng),
             // used_key_rotation: SphinxKeyRotation::from(topology.current_key_rotation()),
-        })
+        }
     }
 
     pub fn encryption_key(&self) -> &SurbEncryptionKey {

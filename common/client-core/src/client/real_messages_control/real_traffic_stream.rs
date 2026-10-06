@@ -22,6 +22,7 @@ use nym_task::ShutdownToken;
 use nym_task::connections::{
     ConnectionCommand, ConnectionCommandReceiver, ConnectionId, LaneQueueLengths, TransmissionLane,
 };
+use nym_topology::path_selection::SharedPathSelector;
 use rand::{CryptoRng, Rng, RngExt};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -53,6 +54,10 @@ pub(crate) struct Config {
     /// Specifies the ratio of `primary_packet_size` to `secondary_packet_size` used in cover traffic.
     /// Only applicable if `secondary_packet_size` is enabled.
     cover_traffic_primary_size_ratio: f64,
+
+    /// Selector of the routes of loop cover packets, shared with the other packet senders of
+    /// this client. `None` for independent uniform routes.
+    path_selector: Option<SharedPathSelector>,
 }
 
 impl Config {
@@ -69,7 +74,13 @@ impl Config {
             average_ack_delay,
             traffic,
             cover_traffic_primary_size_ratio,
+            path_selector: None,
         }
+    }
+
+    pub(crate) fn with_path_selector(mut self, path_selector: Option<SharedPathSelector>) -> Self {
+        self.path_selector = path_selector;
+        self
     }
 }
 
@@ -254,6 +265,7 @@ where
                     generate_loop_cover_packet(
                         &mut self.rng,
                         &topology,
+                        self.config.path_selector.as_ref(),
                         &self.config.ack_key,
                         &self.config.our_full_destination,
                         self.config.average_ack_delay,

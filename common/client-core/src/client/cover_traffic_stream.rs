@@ -13,6 +13,7 @@ use nym_sphinx::cover::generate_loop_cover_packet;
 use nym_sphinx::params::{PacketSize, PacketType};
 use nym_sphinx::utils::sample_poisson_duration;
 use nym_statistics_common::clients::{ClientStatsSender, packet_statistics::PacketStatisticsEvent};
+use nym_topology::path_selection::SharedPathSelector;
 use rand::{CryptoRng, Rng, RngExt};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -58,6 +59,10 @@ where
 
     /// Accessor to the common instance of network topology.
     topology_access: TopologyAccessor,
+
+    /// Selector of the routes of loop cover packets, shared with the other packet senders of
+    /// this client. `None` for independent uniform routes.
+    path_selector: Option<SharedPathSelector>,
 
     /// Primary predefined packet size used for the loop cover messages.
     primary_packet_size: PacketSize,
@@ -111,6 +116,7 @@ impl LoopCoverTrafficStream<OsRng> {
         mix_tx: BatchMixMessageSender,
         our_full_destination: Recipient,
         topology_access: TopologyAccessor,
+        path_selector: Option<SharedPathSelector>,
         traffic_config: config::Traffic,
         cover_config: config::CoverTraffic,
         stats_tx: ClientStatsSender,
@@ -129,6 +135,7 @@ impl LoopCoverTrafficStream<OsRng> {
             our_full_destination,
             rng,
             topology_access,
+            path_selector,
             primary_packet_size: traffic_config.primary_packet_size,
             secondary_packet_size: traffic_config.secondary_packet_size,
             packet_type: traffic_config.packet_type,
@@ -180,6 +187,7 @@ impl LoopCoverTrafficStream<OsRng> {
         let cover_message = match generate_loop_cover_packet(
             &mut self.rng,
             &topology,
+            self.path_selector.as_ref(),
             &self.ack_key,
             &self.our_full_destination,
             self.average_ack_delay,

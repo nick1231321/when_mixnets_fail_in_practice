@@ -1,12 +1,13 @@
 // Copyright 2022-2023 - Nym Technologies SA <contact@nymtech.net>
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{connection_state::BuilderState, Config};
-use crate::mixnet::{MixnetClient, Recipient};
+use super::{Config, connection_state::BuilderState};
 use crate::GatewayTransceiver;
 use crate::NymNetworkDetails;
+use crate::mixnet::{MixnetClient, Recipient};
 use crate::{Error, Result};
 use log::{debug, warn};
+use nym_client_core::client::base_client::BaseClientBuilder;
 use nym_client_core::client::base_client::storage::gateways_storage::GatewayRegistration;
 use nym_client_core::client::base_client::storage::helpers::{
     get_active_gateway_identity, get_all_registered_identities, has_gateway_details,
@@ -15,7 +16,6 @@ use nym_client_core::client::base_client::storage::helpers::{
 use nym_client_core::client::base_client::storage::{
     Ephemeral, GatewaysDetailsStore, MixnetClientStorage,
 };
-use nym_client_core::client::base_client::BaseClientBuilder;
 use nym_client_core::client::base_client::{BaseClient, EventSender};
 use nym_client_core::client::key_manager::persistence::{KeyStore, KeyStoreError};
 use nym_client_core::config::{DebugConfig, ForgetMe, RememberMe, StatsReporting};
@@ -25,9 +25,10 @@ use nym_client_core::init::types::{GatewaySelectionSpecification, GatewaySetup};
 use nym_client_core::init::{refresh_gateway_published_data, setup_gateway};
 use nym_crypto::hkdf::DerivationMaterial;
 use nym_task::ShutdownTracker;
+use nym_topology::path_selection::{AuxiliaryRoutes, AuxiliaryRouting};
 use nym_topology::provider_trait::TopologyProvider;
 use nym_topology::{PathSelectionStrategy, RoutingNode};
-use nym_validator_client::{nyxd, QueryHttpRpcNyxdClient, UserAgent};
+use nym_validator_client::{QueryHttpRpcNyxdClient, UserAgent, nyxd};
 use std::path::Path;
 use std::path::PathBuf;
 use url::Url;
@@ -106,6 +107,7 @@ pub struct MixnetClientBuilder<S: MixnetClientStorage = Ephemeral> {
     derivation_material: Option<DerivationMaterial>,
     stream_idle_timeout: Option<std::time::Duration>,
     path_selection_strategy: PathSelectionStrategy,
+    auxiliary_routes: AuxiliaryRoutes,
 }
 
 impl MixnetClientBuilder<Ephemeral> {
@@ -153,6 +155,7 @@ impl MixnetClientBuilder<OnDiskPersistent> {
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
+            auxiliary_routes: Default::default(),
         })
     }
 }
@@ -188,6 +191,7 @@ where
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
+            auxiliary_routes: Default::default(),
         }
     }
 
@@ -218,6 +222,7 @@ where
             derivation_material: self.derivation_material,
             stream_idle_timeout: self.stream_idle_timeout,
             path_selection_strategy: self.path_selection_strategy,
+            auxiliary_routes: self.auxiliary_routes,
         }
     }
 
@@ -263,6 +268,22 @@ where
     #[must_use]
     pub fn path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
         self.path_selection_strategy = strategy;
+        self
+    }
+
+    /// Set whether the SURB-ACKs of data packets follow the path selection strategy (default)
+    /// or get independent uniform routes.
+    #[must_use]
+    pub fn ack_routing(mut self, routing: AuxiliaryRouting) -> Self {
+        self.auxiliary_routes.ack = routing;
+        self
+    }
+
+    /// Set whether loop cover packets and their SURB-ACKs follow the path selection strategy
+    /// (default) or get independent uniform routes.
+    #[must_use]
+    pub fn cover_routing(mut self, routing: AuxiliaryRouting) -> Self {
+        self.auxiliary_routes.cover = routing;
         self
     }
 
@@ -455,6 +476,7 @@ where
         client.derivation_material = self.derivation_material;
         client.stream_idle_timeout = self.stream_idle_timeout;
         client.path_selection_strategy = self.path_selection_strategy;
+        client.auxiliary_routes = self.auxiliary_routes;
         Ok(client)
     }
 }
@@ -531,6 +553,7 @@ where
 
     stream_idle_timeout: Option<std::time::Duration>,
     path_selection_strategy: PathSelectionStrategy,
+    auxiliary_routes: AuxiliaryRoutes,
 }
 
 impl<S> DisconnectedMixnetClient<S>
@@ -591,6 +614,7 @@ where
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
+            auxiliary_routes: Default::default(),
         })
     }
 
@@ -884,7 +908,8 @@ where
                 .with_remember_me(&self.remember_me)
                 .with_derivation_material(self.derivation_material)
                 .with_nym_api_urls(self.config.network_details.nym_api_urls())
-                .with_path_selection_strategy(self.path_selection_strategy.clone());
+                .with_path_selection_strategy(self.path_selection_strategy.clone())
+                .with_auxiliary_routes(self.auxiliary_routes);
 
         if let Some(user_agent) = self.user_agent {
             base_builder = base_builder.with_user_agent(user_agent);
@@ -1008,6 +1033,7 @@ where
         }
         let stream_idle_timeout = self.stream_idle_timeout;
         let path_selection_strategy = self.path_selection_strategy.clone();
+        let auxiliary_routes = self.auxiliary_routes;
         let (mut started_client, nym_address) = self.connect_to_mixnet_common().await?;
         let client_input = started_client.client_input.register_producer();
         let mut client_output = started_client.client_output.register_consumer();
@@ -1035,6 +1061,7 @@ where
             client.stream_idle_timeout = timeout;
         }
         client.path_selection_strategy = path_selection_strategy;
+        client.auxiliary_routes = auxiliary_routes;
         Ok(client)
     }
 }
@@ -1085,6 +1112,36 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(client.path_selection_strategy, strategy);
+    }
+
+    #[test]
+    fn auxiliary_routes_are_passed_to_built_client() {
+        let default_client = MixnetClientBuilder::new_ephemeral().build().unwrap();
+        assert_eq!(default_client.auxiliary_routes, AuxiliaryRoutes::default());
+
+        let client = MixnetClientBuilder::new_ephemeral()
+            .ack_routing(AuxiliaryRouting::Baseline)
+            .build()
+            .unwrap();
+        assert_eq!(
+            client.auxiliary_routes,
+            AuxiliaryRoutes {
+                ack: AuxiliaryRouting::Baseline,
+                cover: AuxiliaryRouting::FollowStrategy,
+            }
+        );
+
+        let client = MixnetClientBuilder::new_ephemeral()
+            .cover_routing(AuxiliaryRouting::Baseline)
+            .build()
+            .unwrap();
+        assert_eq!(
+            client.auxiliary_routes,
+            AuxiliaryRoutes {
+                ack: AuxiliaryRouting::FollowStrategy,
+                cover: AuxiliaryRouting::Baseline,
+            }
+        );
     }
 
     #[test]
@@ -1143,16 +1200,20 @@ mod tests {
                 .with_key_passphrase(Some(Passphrase::new("hunter3")));
             let no_passphrase = StoragePaths::new_from_dir(dir.path()).unwrap();
 
-            assert!(client_with(wrong_passphrase)
-                .await
-                .setup_client_keys()
-                .await
-                .is_err());
-            assert!(client_with(no_passphrase)
-                .await
-                .setup_client_keys()
-                .await
-                .is_err());
+            assert!(
+                client_with(wrong_passphrase)
+                    .await
+                    .setup_client_keys()
+                    .await
+                    .is_err()
+            );
+            assert!(
+                client_with(no_passphrase)
+                    .await
+                    .setup_client_keys()
+                    .await
+                    .is_err()
+            );
             assert_eq!(std::fs::read(&encrypted.private_identity).unwrap(), before);
         }
     }

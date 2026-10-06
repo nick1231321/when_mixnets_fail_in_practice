@@ -1,7 +1,7 @@
 //! Self-test with α-Sticky Selection (α-SS): with probability α a packet reuses a route
 //! already assigned in the session, otherwise it gets a fresh uniformly random route.
 //!
-//! Usage: nym-self-test-alpha [network.json] [--size BYTES] [--alpha ALPHA]
+//! Usage: nym-self-test-alpha [network.json] [--size BYTES] [--ack-routing ROUTING] [--cover-routing ROUTING] [--alpha ALPHA]
 //!
 //! --alpha ALPHA   reuse probability in [0, 1] (default: 0.8)
 

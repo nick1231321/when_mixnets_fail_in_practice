@@ -1,7 +1,7 @@
 //! Self-test with K/W: K nodes are preselected per layer once per session; every packet
 //! samples uniformly from that subset in each layer.
 //!
-//! Usage: nym-self-test-kw [network.json] [--size BYTES] [--k K]
+//! Usage: nym-self-test-kw [network.json] [--size BYTES] [--ack-routing ROUTING] [--cover-routing ROUTING] [--k K]
 //!
 //! --k K   nodes preselected per layer (default: 2; values above the layer size use all nodes)
 

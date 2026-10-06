@@ -14,6 +14,7 @@ use nym_sphinx_params::{
     PacketEncryptionAlgorithm, PacketHkdfAlgorithm, PacketType, SphinxKeyRotation,
 };
 use nym_sphinx_types::NymPacket;
+use nym_topology::path_selection::{RouteKind, SharedPathSelector};
 use nym_topology::{NymRouteProvider, NymTopologyError};
 use rand::CryptoRng;
 
@@ -34,9 +35,12 @@ pub enum CoverMessageError {
     NymPacket(#[from] nym_sphinx_types::NymPacketError),
 }
 
+/// Routes of loop cover packets and their acks are chosen by `path_selector` (in the session of
+/// `full_address`) if there is one, otherwise uniformly at random. Mix hops are always enabled.
 pub fn generate_loop_cover_surb_ack<R>(
     rng: &mut R,
     topology: &NymRouteProvider,
+    path_selector: Option<&SharedPathSelector>,
     ack_key: &AckKey,
     full_address: &Recipient,
     average_ack_delay: time::Duration,
@@ -45,15 +49,21 @@ pub fn generate_loop_cover_surb_ack<R>(
 where
     R: CryptoRng,
 {
-    Ok(SurbAck::construct(
+    let route = topology.route_to_egress_for_session(
+        rng,
+        path_selector,
+        full_address,
+        RouteKind::CoverAck,
+        full_address.gateway(),
+    )?;
+    Ok(SurbAck::construct_with_route(
         rng,
         full_address,
         ack_key,
         COVER_FRAG_ID.to_bytes(),
         average_ack_delay,
-        topology,
+        route,
         packet_type,
-        false, // make sure mix hops are enabled
     )?)
 }
 
@@ -61,6 +71,7 @@ where
 pub fn generate_loop_cover_packet<R>(
     rng: &mut R,
     topology: &NymRouteProvider,
+    path_selector: Option<&SharedPathSelector>,
     ack_key: &AckKey,
     full_address: &Recipient,
     average_ack_delay: time::Duration,
@@ -75,6 +86,7 @@ where
     let (_, ack_bytes) = generate_loop_cover_surb_ack(
         rng,
         topology,
+        path_selector,
         ack_key,
         full_address,
         average_ack_delay,
@@ -119,7 +131,13 @@ where
         .chain(cover_content)
         .collect();
 
-    let route = topology.random_route_to_egress(rng, full_address.gateway())?;
+    let route = topology.route_to_egress_for_session(
+        rng,
+        path_selector,
+        full_address,
+        RouteKind::Cover,
+        full_address.gateway(),
+    )?;
     let delays = nym_sphinx_routing::generate_hop_delays(average_packet_delay, route.len());
     let destination = full_address.as_sphinx_destination();
 

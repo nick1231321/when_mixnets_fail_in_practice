@@ -54,8 +54,9 @@ use nym_statistics_common::clients::ClientStatsSender;
 use nym_statistics_common::generate_client_stats_id;
 use nym_task::ShutdownTracker;
 use nym_task::connections::{ConnectionCommandReceiver, ConnectionCommandSender, LaneQueueLengths};
-use nym_topology::{HardcodedTopologyProvider, PathSelectionStrategy};
+use nym_topology::path_selection::{AuxiliaryRoutes, PathSelector, SharedPathSelector};
 use nym_topology::provider_trait::TopologyProvider;
+use nym_topology::{HardcodedTopologyProvider, PathSelectionStrategy};
 use nym_validator_client::nym_api::NymApiClientExt;
 use nym_validator_client::{UserAgent, nyxd::contract_traits::DkgQueryClient};
 use rand::seq::SliceRandom;
@@ -234,6 +235,7 @@ pub struct BaseClientBuilder<C, S: MixnetClientStorage> {
     derivation_material: Option<DerivationMaterial>,
 
     path_selection_strategy: PathSelectionStrategy,
+    auxiliary_routes: AuxiliaryRoutes,
 }
 
 impl<C, S> BaseClientBuilder<C, S>
@@ -264,6 +266,7 @@ where
             connection_fd_callback: None,
             derivation_material: None,
             path_selection_strategy: PathSelectionStrategy::Baseline,
+            auxiliary_routes: AuxiliaryRoutes::default(),
         }
     }
 
@@ -271,6 +274,14 @@ where
     #[must_use]
     pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
         self.path_selection_strategy = strategy;
+        self
+    }
+
+    /// Set whether acks of data packets and loop cover traffic follow the path selection strategy
+    /// or get independent uniform routes.
+    #[must_use]
+    pub fn with_auxiliary_routes(mut self, auxiliary_routes: AuxiliaryRoutes) -> Self {
+        self.auxiliary_routes = auxiliary_routes;
         self
     }
 
@@ -408,6 +419,7 @@ where
         ack_key: Arc<AckKey>,
         self_address: Recipient,
         topology_accessor: TopologyAccessor,
+        path_selector: Option<SharedPathSelector>,
         mix_tx: BatchMixMessageSender,
         stats_tx: ClientStatsSender,
         shutdown_tracker: &ShutdownTracker,
@@ -420,6 +432,7 @@ where
             mix_tx,
             self_address,
             topology_accessor,
+            path_selector,
             debug_config.traffic,
             debug_config.cover_traffic,
             stats_tx,
@@ -1142,12 +1155,20 @@ where
         // primarily to throttle incoming connections (e.g socks5 for attached network-requesters)
         let shared_lane_queue_lengths = LaneQueueLengths::new();
 
+        // One selector for every packet sender of this client, so that forward packets, their
+        // acks, reply SURBs and loop cover traffic all route within the same sessions (unless
+        // the auxiliary routes take acks or cover traffic out of them).
+        let path_selector = PathSelector::new_shared_for(
+            self.path_selection_strategy.clone(),
+            self.auxiliary_routes,
+        );
+
         let controller_config = real_messages_control::Config::new(
             &self.config.debug,
             Arc::clone(&ack_key),
             self_address,
         )
-        .with_path_selection_strategy(self.path_selection_strategy.clone());
+        .with_path_selector(path_selector.clone());
 
         Self::start_real_traffic_controller(
             controller_config,
@@ -1176,6 +1197,7 @@ where
                 ack_key,
                 self_address,
                 shared_topology_accessor.clone(),
+                path_selector,
                 message_sender,
                 stats_reporter.clone(),
                 &shutdown_tracker.clone(),

@@ -7,6 +7,12 @@
 //! Each strategy constrains the routes assigned to packets of the same client-destination
 //! session, to reduce the chance that any packet traverses a fully compromised route.
 //!
+//! A session covers every packet of a conversation, not only the forward data packets: the
+//! SURB-ACKs and reply SURBs created for messages to a recipient draw their mix path from that
+//! recipient's session, and loop cover traffic uses the session of the client's own address.
+//! [`AuxiliaryRoutes`] can instead give the acks of data packets, or the loop cover packets and
+//! their acks, independent uniform routes that leave the sessions untouched.
+//!
 //! Routing decisions are logged under the `nym_topology::path_selection` target: new sessions
 //! at `info` and every chosen route at `debug`.
 
@@ -52,6 +58,86 @@ pub enum PathSelectionStrategy {
     AlphaSticky { alpha: f64 },
 }
 
+/// How the routes of one kind of auxiliary packet (acks or loop cover traffic) are chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuxiliaryRouting {
+    /// Follow the [`PathSelectionStrategy`], sharing the session with the other packets.
+    #[default]
+    FollowStrategy,
+
+    /// Independent, uniformly random route per packet; the session is left untouched.
+    Baseline,
+}
+
+impl std::str::FromStr for AuxiliaryRouting {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "strategy" => Ok(AuxiliaryRouting::FollowStrategy),
+            "baseline" => Ok(AuxiliaryRouting::Baseline),
+            _ => Err(format!(
+                "invalid routing '{value}' (expected 'strategy' or 'baseline')"
+            )),
+        }
+    }
+}
+
+/// Routing of the packets other than forward data packets and reply SURBs, which always follow
+/// the [`PathSelectionStrategy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AuxiliaryRoutes {
+    /// SURB-ACKs of data packets.
+    pub ack: AuxiliaryRouting,
+
+    /// Loop cover packets and their SURB-ACKs.
+    pub cover: AuxiliaryRouting,
+}
+
+impl AuxiliaryRoutes {
+    /// How routes of `kind` packets are chosen.
+    pub fn routing(&self, kind: RouteKind) -> AuxiliaryRouting {
+        match kind {
+            RouteKind::Forward | RouteKind::ReplySurb => AuxiliaryRouting::FollowStrategy,
+            RouteKind::Ack => self.ack,
+            RouteKind::Cover | RouteKind::CoverAck => self.cover,
+        }
+    }
+}
+
+/// The kind of packet a route is chosen for. Unless [`AuxiliaryRoutes`] says otherwise, all kinds
+/// share the session state and the kind only labels the routing decision in the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteKind {
+    /// Forward data packet to the session's recipient.
+    Forward,
+
+    /// SURB-ACK of a data packet sent in the session.
+    Ack,
+
+    /// Reply SURB handed to the session's recipient.
+    ReplySurb,
+
+    /// Loop cover packet.
+    Cover,
+
+    /// SURB-ACK carried by a loop cover packet.
+    CoverAck,
+}
+
+impl std::fmt::Display for RouteKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            RouteKind::Forward => "forward",
+            RouteKind::Ack => "ack",
+            RouteKind::ReplySurb => "reply-surb",
+            RouteKind::Cover => "cover",
+            RouteKind::CoverAck => "cover-ack",
+        };
+        f.write_str(kind)
+    }
+}
+
 /// Per-session state of a strategy.
 #[derive(Debug)]
 enum SessionState {
@@ -78,6 +164,7 @@ struct Session {
 #[derive(Debug)]
 pub struct PathSelector {
     strategy: PathSelectionStrategy,
+    auxiliary_routes: AuxiliaryRoutes,
     sessions: HashMap<RecipientBytes, Session>,
 }
 
@@ -160,24 +247,56 @@ impl PathSelector {
     pub fn new(strategy: PathSelectionStrategy) -> Self {
         PathSelector {
             strategy,
+            auxiliary_routes: AuxiliaryRoutes::default(),
             sessions: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_auxiliary_routes(mut self, auxiliary_routes: AuxiliaryRoutes) -> Self {
+        self.auxiliary_routes = auxiliary_routes;
+        self
     }
 
     pub fn new_shared(strategy: PathSelectionStrategy) -> SharedPathSelector {
         Arc::new(Mutex::new(Self::new(strategy)))
     }
 
+    /// Shared selector for `strategy`, or `None` for [`PathSelectionStrategy::Baseline`], whose
+    /// independent uniform routes need no session state.
+    pub fn new_shared_for(
+        strategy: PathSelectionStrategy,
+        auxiliary_routes: AuxiliaryRoutes,
+    ) -> Option<SharedPathSelector> {
+        match strategy {
+            PathSelectionStrategy::Baseline => None,
+            strategy => {
+                info!(
+                    "[path-selection] forward and reply SURB routes will use {strategy:?}; ack routing: {:?}, cover routing: {:?}",
+                    auxiliary_routes.ack, auxiliary_routes.cover
+                );
+                Some(Arc::new(Mutex::new(
+                    Self::new(strategy).with_auxiliary_routes(auxiliary_routes),
+                )))
+            }
+        }
+    }
+
     pub fn strategy(&self) -> &PathSelectionStrategy {
         &self.strategy
     }
 
-    /// Chooses the mix path for the next packet sent to `recipient`.
+    pub fn auxiliary_routes(&self) -> &AuxiliaryRoutes {
+        &self.auxiliary_routes
+    }
+
+    /// Chooses the mix path for the next `kind` packet of the session with `recipient`.
     pub fn select_path<R>(
         &mut self,
         rng: &mut R,
         topology: &NymTopology,
         recipient: &Recipient,
+        kind: RouteKind,
     ) -> Result<MixPath, NymTopologyError>
     where
         R: Rng + CryptoRng + ?Sized,
@@ -187,7 +306,15 @@ impl PathSelector {
 
         if matches!(self.strategy, PathSelectionStrategy::Baseline) {
             let path = random_path(rng, &layers);
-            debug!("[path-selection] session {label}: baseline route {path:?}");
+            debug!("[path-selection] session {label} ({kind}): baseline route {path:?}");
+            return Ok(path);
+        }
+
+        if self.auxiliary_routes.routing(kind) == AuxiliaryRouting::Baseline {
+            let path = random_path(rng, &layers);
+            debug!(
+                "[path-selection] session {label} ({kind}): baseline route {path:?} (configured for {kind} packets, session untouched)"
+            );
             return Ok(path);
         }
 
@@ -217,7 +344,9 @@ impl PathSelector {
                     }
                     None => *layers[l].choose(rng).unwrap(),
                 });
-                debug!("[path-selection] session {label} packet #{packet}: K-HF route {path:?} (fixed {fixed:?})");
+                debug!(
+                    "[path-selection] session {label} packet #{packet} ({kind}): K-HF route {path:?} (fixed {fixed:?})"
+                );
                 path
             }
             SessionState::KOverW { subsets } => {
@@ -232,7 +361,9 @@ impl PathSelector {
                     }
                 }
                 let path = std::array::from_fn(|l| *subsets[l].choose(rng).unwrap());
-                debug!("[path-selection] session {label} packet #{packet}: K/W route {path:?}");
+                debug!(
+                    "[path-selection] session {label} packet #{packet} ({kind}): K/W route {path:?}"
+                );
                 path
             }
             SessionState::AlphaSticky {
@@ -245,12 +376,18 @@ impl PathSelector {
                 leading.retain(|path| path_is_valid(path, &layers));
                 leading_lookup.retain(|path| path_is_valid(path, &layers));
 
-                // with probability 1 - alpha (and always for the first packet) take a route
-                // sampled uniformly from those not yet in the leading set
-                let fresh = if leading.is_empty() || !rng.random_bool(alpha) {
-                    random_unused_path(rng, &layers, leading_lookup)
-                } else {
-                    None
+                // roll a uniform number in [0, 1): reuse a leading-set route if it is below
+                // alpha, otherwise take a route sampled uniformly from those not yet in the
+                // leading set. The first packet has nothing to reuse, so it does not roll.
+                let roll: Option<f64> = (!leading.is_empty()).then(|| rng.random());
+                let dice = match roll {
+                    Some(roll) if roll < alpha => format!("roll {roll:.4} < α={alpha} → reuse"),
+                    Some(roll) => format!("roll {roll:.4} ≥ α={alpha} → new"),
+                    None => "first packet, no roll → new".to_string(),
+                };
+                let fresh = match roll {
+                    Some(roll) if roll < alpha => None,
+                    _ => random_unused_path(rng, &layers, leading_lookup),
                 };
 
                 match fresh {
@@ -258,7 +395,7 @@ impl PathSelector {
                         leading_lookup.insert(path);
                         leading.push(path);
                         debug!(
-                            "[path-selection] session {label} packet #{packet}: α-SS new route {path:?} (leading set: {} routes)",
+                            "[path-selection] session {label} packet #{packet} ({kind}): [{dice}] α-SS new route {path:?} (leading set: {} routes)",
                             leading.len()
                         );
                         path
@@ -267,8 +404,13 @@ impl PathSelector {
                         // leading set is non-empty here: a fresh route always exists for the
                         // first packet since all layers are non-empty
                         let path = *leading.choose(rng).unwrap();
+                        let note = if roll.is_some_and(|roll| roll >= alpha) {
+                            " (no unused routes left, reusing instead)"
+                        } else {
+                            ""
+                        };
                         debug!(
-                            "[path-selection] session {label} packet #{packet}: α-SS reused route {path:?} (leading set: {} routes)",
+                            "[path-selection] session {label} packet #{packet} ({kind}): [{dice}] α-SS reused route {path:?}{note} (leading set: {} routes)",
                             leading.len()
                         );
                         path
@@ -310,12 +452,13 @@ impl PathSelector {
                             l + 1
                         );
                     }
-                    let mut subset: Vec<NodeId> =
-                        layers[l].sample(rng, *k).copied().collect();
+                    let mut subset: Vec<NodeId> = layers[l].sample(rng, *k).copied().collect();
                     subset.sort_unstable();
                     subset
                 });
-                info!("[path-selection] new session {label}: K/W (K={k}) preselected nodes per layer {subsets:?}");
+                info!(
+                    "[path-selection] new session {label}: K/W (K={k}) preselected nodes per layer {subsets:?}"
+                );
                 SessionState::KOverW { subsets }
             }
             PathSelectionStrategy::AlphaSticky { alpha } => {
@@ -330,19 +473,20 @@ impl PathSelector {
 }
 
 impl NymRouteProvider {
-    /// Builds the sphinx route for the next packet sent to `recipient`, choosing its mix path
-    /// with the given [`PathSelector`] and ending at `egress`.
+    /// Builds the sphinx route for the next `kind` packet of the session with `recipient`,
+    /// choosing its mix path with the given [`PathSelector`] and ending at `egress`.
     pub fn route_to_egress_with_selector<R>(
         &self,
         rng: &mut R,
         selector: &mut PathSelector,
         recipient: &Recipient,
+        kind: RouteKind,
         egress: NodeIdentity,
     ) -> Result<Vec<SphinxNode>, NymTopologyError>
     where
         R: Rng + CryptoRng + ?Sized,
     {
-        let path = selector.select_path(rng, &self.topology, recipient)?;
+        let path = selector.select_path(rng, &self.topology, recipient, kind)?;
         let mut route: Vec<SphinxNode> = path
             .iter()
             .map(|id| {
@@ -356,6 +500,30 @@ impl NymRouteProvider {
         route.extend(self.empty_route_to_egress(egress)?);
         Ok(route)
     }
+
+    /// Builds the sphinx route for the next `kind` packet of the session with `recipient`:
+    /// chosen by `selector` if there is one, otherwise uniformly at random.
+    pub fn route_to_egress_for_session<R>(
+        &self,
+        rng: &mut R,
+        selector: Option<&SharedPathSelector>,
+        recipient: &Recipient,
+        kind: RouteKind,
+        egress: NodeIdentity,
+    ) -> Result<Vec<SphinxNode>, NymTopologyError>
+    where
+        R: Rng + CryptoRng + ?Sized,
+    {
+        match selector {
+            Some(selector) => {
+                let mut selector = selector
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.route_to_egress_with_selector(rng, &mut selector, recipient, kind, egress)
+            }
+            None => self.random_route_to_egress(rng, egress),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -363,8 +531,8 @@ mod tests {
     use super::*;
     use crate::node::{RoutingNode, SupportedRoles};
     use nym_crypto::asymmetric::{ed25519, x25519};
-    use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use rand_chacha::rand_core::SeedableRng;
 
     const W: usize = 5;
     const PACKETS: usize = 1000;
@@ -426,7 +594,11 @@ mod tests {
         let recipient = test_recipient(&mut rng);
         let mut selector = PathSelector::new(strategy);
         let paths = (0..packets)
-            .map(|_| selector.select_path(&mut rng, &topology, &recipient).unwrap())
+            .map(|_| {
+                selector
+                    .select_path(&mut rng, &topology, &recipient, RouteKind::Forward)
+                    .unwrap()
+            })
             .collect();
         (selector, paths)
     }
@@ -443,7 +615,9 @@ mod tests {
     fn every_path_uses_one_node_from_each_layer() {
         let strategies = [
             PathSelectionStrategy::Baseline,
-            PathSelectionStrategy::KHopsFixed { fixed_layers: vec![2] },
+            PathSelectionStrategy::KHopsFixed {
+                fixed_layers: vec![2],
+            },
             PathSelectionStrategy::KOverW { k: 2 },
             PathSelectionStrategy::AlphaSticky { alpha: 0.5 },
         ];
@@ -452,7 +626,11 @@ mod tests {
             for path in paths {
                 for (l, node) in path.iter().enumerate() {
                     let layer_ids = (l * W + 1) as NodeId..=((l + 1) * W) as NodeId;
-                    assert!(layer_ids.contains(node), "node {node} is not on layer {}", l + 1);
+                    assert!(
+                        layer_ids.contains(node),
+                        "node {node} is not on layer {}",
+                        l + 1
+                    );
                 }
             }
         }
@@ -468,7 +646,9 @@ mod tests {
     #[test]
     fn khf_fixes_only_the_selected_layers() {
         let (_, paths) = run(
-            PathSelectionStrategy::KHopsFixed { fixed_layers: vec![1, 2] },
+            PathSelectionStrategy::KHopsFixed {
+                fixed_layers: vec![1, 2],
+            },
             PACKETS,
         );
         assert_eq!(distinct_on_layer(&paths, 0), 1);
@@ -479,7 +659,9 @@ mod tests {
     #[test]
     fn khf_with_all_layers_fixed_uses_a_single_route() {
         let (_, paths) = run(
-            PathSelectionStrategy::KHopsFixed { fixed_layers: vec![1, 2, 3] },
+            PathSelectionStrategy::KHopsFixed {
+                fixed_layers: vec![1, 2, 3],
+            },
             PACKETS,
         );
         assert_eq!(distinct_paths(&paths), 1);
@@ -517,17 +699,25 @@ mod tests {
     #[test]
     fn alpha_falls_back_to_reuse_once_all_routes_are_used() {
         let total = W.pow(MIX_LAYERS as u32);
-        let (selector, paths) =
-            run(PathSelectionStrategy::AlphaSticky { alpha: 0.0 }, total + 50);
+        let (selector, paths) = run(
+            PathSelectionStrategy::AlphaSticky { alpha: 0.0 },
+            total + 50,
+        );
         assert_eq!(distinct_paths(&paths), total);
-        assert_eq!(selector.sessions.values().next().unwrap().packets, (total + 50) as u64);
+        assert_eq!(
+            selector.sessions.values().next().unwrap().packets,
+            (total + 50) as u64
+        );
     }
 
     #[test]
     fn alpha_reuse_rate_matches_alpha() {
         // expected leading set size: 1 + (1 - alpha) * (PACKETS - 1) ≈ 200, out of 1000 routes
-        let (selector, _) =
-            run_with_width(PathSelectionStrategy::AlphaSticky { alpha: 0.8 }, PACKETS, 10);
+        let (selector, _) = run_with_width(
+            PathSelectionStrategy::AlphaSticky { alpha: 0.8 },
+            PACKETS,
+            10,
+        );
         let session = selector.sessions.values().next().unwrap();
         let SessionState::AlphaSticky { leading, .. } = &session.state else {
             panic!("unexpected session state")
@@ -541,17 +731,155 @@ mod tests {
     }
 
     #[test]
+    fn all_route_kinds_share_the_session() {
+        let mut rng = rng();
+        let topology = test_topology(&mut rng, W);
+        let recipient = test_recipient(&mut rng);
+        let mut selector = PathSelector::new(PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1, 2, 3],
+        });
+        let kinds = [
+            RouteKind::Forward,
+            RouteKind::Ack,
+            RouteKind::ReplySurb,
+            RouteKind::Cover,
+            RouteKind::CoverAck,
+        ];
+        let paths: Vec<MixPath> = kinds
+            .iter()
+            .map(|&kind| {
+                selector
+                    .select_path(&mut rng, &topology, &recipient, kind)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(distinct_paths(&paths), 1);
+        assert_eq!(selector.sessions.len(), 1);
+        assert_eq!(
+            selector.sessions[&recipient.to_bytes()].packets,
+            kinds.len() as u64
+        );
+    }
+
+    fn all_layers_fixed() -> PathSelectionStrategy {
+        PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn baseline_ack_routing_bypasses_the_session() {
+        let mut rng = rng();
+        let topology = test_topology(&mut rng, W);
+        let recipient = test_recipient(&mut rng);
+        let mut selector =
+            PathSelector::new(all_layers_fixed()).with_auxiliary_routes(AuxiliaryRoutes {
+                ack: AuxiliaryRouting::Baseline,
+                cover: AuxiliaryRouting::FollowStrategy,
+            });
+        let fixed = selector
+            .select_path(&mut rng, &topology, &recipient, RouteKind::Forward)
+            .unwrap();
+
+        let acks: Vec<MixPath> = (0..PACKETS)
+            .map(|_| {
+                selector
+                    .select_path(&mut rng, &topology, &recipient, RouteKind::Ack)
+                    .unwrap()
+            })
+            .collect();
+        // with every layer fixed the strategy would give a single route
+        assert!(distinct_paths(&acks) > W);
+        assert_eq!(selector.sessions[&recipient.to_bytes()].packets, 1);
+
+        // the cover ack follows the cover routing, i.e. the strategy here
+        let cover_ack = selector
+            .select_path(&mut rng, &topology, &recipient, RouteKind::CoverAck)
+            .unwrap();
+        assert_eq!(cover_ack, fixed);
+        assert_eq!(selector.sessions[&recipient.to_bytes()].packets, 2);
+    }
+
+    #[test]
+    fn baseline_cover_routing_bypasses_the_session() {
+        let mut rng = rng();
+        let topology = test_topology(&mut rng, W);
+        let us = test_recipient(&mut rng);
+        let mut selector =
+            PathSelector::new(all_layers_fixed()).with_auxiliary_routes(AuxiliaryRoutes {
+                ack: AuxiliaryRouting::FollowStrategy,
+                cover: AuxiliaryRouting::Baseline,
+            });
+
+        let cover: Vec<MixPath> = (0..PACKETS)
+            .flat_map(|_| [RouteKind::Cover, RouteKind::CoverAck])
+            .map(|kind| {
+                selector
+                    .select_path(&mut rng, &topology, &us, kind)
+                    .unwrap()
+            })
+            .collect();
+        // with every layer fixed the strategy would give a single route
+        assert!(distinct_paths(&cover) > W);
+        assert!(selector.sessions.is_empty());
+
+        // acks of data packets still follow the strategy
+        let ack = selector
+            .select_path(&mut rng, &topology, &us, RouteKind::Ack)
+            .unwrap();
+        let forward = selector
+            .select_path(&mut rng, &topology, &us, RouteKind::Forward)
+            .unwrap();
+        assert_eq!(ack, forward);
+        assert_eq!(selector.sessions[&us.to_bytes()].packets, 2);
+    }
+
+    #[test]
+    fn forward_and_reply_surbs_always_follow_the_strategy() {
+        let routes = AuxiliaryRoutes {
+            ack: AuxiliaryRouting::Baseline,
+            cover: AuxiliaryRouting::Baseline,
+        };
+        assert_eq!(
+            routes.routing(RouteKind::Forward),
+            AuxiliaryRouting::FollowStrategy
+        );
+        assert_eq!(
+            routes.routing(RouteKind::ReplySurb),
+            AuxiliaryRouting::FollowStrategy
+        );
+        assert_eq!(routes.routing(RouteKind::Ack), AuxiliaryRouting::Baseline);
+        assert_eq!(routes.routing(RouteKind::Cover), AuxiliaryRouting::Baseline);
+        assert_eq!(
+            routes.routing(RouteKind::CoverAck),
+            AuxiliaryRouting::Baseline
+        );
+    }
+
+    #[test]
+    fn auxiliary_routing_parses_from_str() {
+        assert_eq!("strategy".parse(), Ok(AuxiliaryRouting::FollowStrategy));
+        assert_eq!("baseline".parse(), Ok(AuxiliaryRouting::Baseline));
+        assert!("random".parse::<AuxiliaryRouting>().is_err());
+    }
+
+    #[test]
     fn sessions_are_kept_per_recipient() {
         let mut rng = rng();
         let topology = test_topology(&mut rng, W);
         let alice = test_recipient(&mut rng);
         let bob = test_recipient(&mut rng);
-        let mut selector =
-            PathSelector::new(PathSelectionStrategy::KHopsFixed { fixed_layers: vec![1] });
+        let mut selector = PathSelector::new(PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1],
+        });
 
         for _ in 0..10 {
-            selector.select_path(&mut rng, &topology, &alice).unwrap();
-            selector.select_path(&mut rng, &topology, &bob).unwrap();
+            selector
+                .select_path(&mut rng, &topology, &alice, RouteKind::Forward)
+                .unwrap();
+            selector
+                .select_path(&mut rng, &topology, &bob, RouteKind::Forward)
+                .unwrap();
         }
         assert_eq!(selector.sessions.len(), 2);
         assert!(selector.sessions.values().all(|s| s.packets == 10));
@@ -562,15 +890,22 @@ mod tests {
         let mut rng = rng();
         let mut topology = test_topology(&mut rng, W);
         let recipient = test_recipient(&mut rng);
-        let mut selector =
-            PathSelector::new(PathSelectionStrategy::KHopsFixed { fixed_layers: vec![1] });
+        let mut selector = PathSelector::new(PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1],
+        });
 
-        let fixed = selector.select_path(&mut rng, &topology, &recipient).unwrap()[0];
+        let fixed = selector
+            .select_path(&mut rng, &topology, &recipient, RouteKind::Forward)
+            .unwrap()[0];
         topology.node_details.remove(&fixed);
 
-        let replacement = selector.select_path(&mut rng, &topology, &recipient).unwrap()[0];
+        let replacement = selector
+            .select_path(&mut rng, &topology, &recipient, RouteKind::Forward)
+            .unwrap()[0];
         assert_ne!(replacement, fixed);
-        let later = selector.select_path(&mut rng, &topology, &recipient).unwrap()[0];
+        let later = selector
+            .select_path(&mut rng, &topology, &recipient, RouteKind::Forward)
+            .unwrap()[0];
         assert_eq!(later, replacement);
     }
 }

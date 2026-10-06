@@ -21,7 +21,8 @@ use nym_sphinx::params::{PacketSize, PacketType};
 use nym_sphinx::preparer::{MessagePreparer, PreparedFragment};
 use nym_task::ShutdownToken;
 use nym_task::connections::TransmissionLane;
-use nym_topology::{NymRouteProvider, NymTopologyError, PathSelectionStrategy};
+use nym_topology::path_selection::SharedPathSelector;
+use nym_topology::{NymRouteProvider, NymTopologyError};
 use rand::{CryptoRng, Rng};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,8 +121,9 @@ pub(crate) struct Config {
     /// Optional secondary predefined packet size used for the encapsulated messages.
     secondary_packet_size: Option<PacketSize>,
 
-    /// Strategy used to choose forward routes for packets of each client-destination session.
-    path_selection_strategy: PathSelectionStrategy,
+    /// Selector of the routes of packets of each client-destination session, shared with the
+    /// other packet senders of this client. `None` for independent uniform routes.
+    path_selector: Option<SharedPathSelector>,
 }
 
 impl Config {
@@ -141,7 +143,7 @@ impl Config {
             primary_packet_size: PacketSize::default(),
             secondary_packet_size: None,
             disable_mix_hops: false,
-            path_selection_strategy: PathSelectionStrategy::Baseline,
+            path_selector: None,
         }
     }
 
@@ -163,9 +165,9 @@ impl Config {
         self
     }
 
-    /// Configure the strategy used to choose forward routes for packets of each client-destination session.
-    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
-        self.path_selection_strategy = strategy;
+    /// Configure the selector used to choose the routes of packets of each client-destination session.
+    pub fn with_path_selector(mut self, path_selector: Option<SharedPathSelector>) -> Self {
+        self.path_selector = path_selector;
         self
     }
 }
@@ -215,7 +217,7 @@ where
             config.average_ack_delay,
             config.disable_mix_hops,
         )
-        .with_path_selection_strategy(config.path_selection_strategy.clone());
+        .with_path_selector(config.path_selector.clone());
         MessageHandler {
             config,
             rng,
@@ -286,10 +288,11 @@ where
         &mut self,
         topology: &NymRouteProvider,
         amount: usize,
+        recipient: &Recipient,
     ) -> Result<Vec<ReplySurbWithKeyRotation>, PreparationError> {
         let reply_surbs = self
             .message_preparer
-            .generate_reply_surbs(amount, topology)?;
+            .generate_reply_surbs(amount, topology, recipient)?;
 
         Ok(reply_surbs)
     }
@@ -559,7 +562,7 @@ where
 
         // the surbs and the message carrying them are built against the same view of the network
         let topology = self.get_topology()?;
-        let reply_surbs = self.generate_reply_surbs(&topology, amount as usize)?;
+        let reply_surbs = self.generate_reply_surbs(&topology, amount as usize, &recipient)?;
 
         let reply_keys = reply_surbs
             .iter()
@@ -604,7 +607,8 @@ where
 
         // the surbs and the message carrying them are built against the same view of the network
         let topology = self.get_topology()?;
-        let reply_surbs = self.generate_reply_surbs(&topology, num_reply_surbs as usize)?;
+        let reply_surbs =
+            self.generate_reply_surbs(&topology, num_reply_surbs as usize, &recipient)?;
 
         let reply_keys = reply_surbs
             .iter()

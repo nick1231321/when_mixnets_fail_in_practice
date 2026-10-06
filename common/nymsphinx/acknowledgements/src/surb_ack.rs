@@ -10,7 +10,7 @@ use nym_sphinx_addressing::nodes::{
 use nym_sphinx_params::PacketType;
 use nym_sphinx_params::packet_sizes::PacketSize;
 use nym_sphinx_types::delays::Delay;
-use nym_sphinx_types::{NymPacket, NymPacketError};
+use nym_sphinx_types::{Node as SphinxNode, NymPacket, NymPacketError};
 use nym_topology::{NymRouteProvider, NymTopologyError};
 use rand::CryptoRng;
 use std::time;
@@ -56,14 +56,38 @@ impl SurbAck {
     where
         R: CryptoRng,
     {
-        let PacketType::Mix = packet_type else {
-            return Err(NymTopologyError::PacketTypeNotSupported);
-        };
-
         let route = if disable_mix_hops {
             topology.empty_route_to_egress(recipient.gateway())?
         } else {
             topology.random_route_to_egress(rng, recipient.gateway())?
+        };
+
+        Self::construct_with_route(
+            rng,
+            recipient,
+            ack_key,
+            marshaled_fragment_id,
+            average_delay,
+            route,
+            packet_type,
+        )
+    }
+
+    /// Construct a SurbAck over the given `route`, which must end at the gateway of `recipient`.
+    pub fn construct_with_route<R>(
+        rng: &mut R,
+        recipient: &Recipient,
+        ack_key: &AckKey,
+        marshaled_fragment_id: [u8; 5],
+        average_delay: time::Duration,
+        route: Vec<SphinxNode>,
+        packet_type: PacketType,
+    ) -> Result<Self, NymTopologyError>
+    where
+        R: CryptoRng,
+    {
+        let PacketType::Mix = packet_type else {
+            return Err(NymTopologyError::PacketTypeNotSupported);
         };
 
         let delays = nym_sphinx_routing::generate_hop_delays(average_delay, route.len());

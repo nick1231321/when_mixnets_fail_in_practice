@@ -1,12 +1,12 @@
-use crate::mixnet::client::MixnetClientBuilder;
 #[cfg(feature = "stream")]
 use crate::mixnet::client::DEFAULT_NUMBER_OF_SURBS;
+use crate::mixnet::client::MixnetClientBuilder;
 #[cfg(feature = "stream")]
 use crate::mixnet::stream::{MixnetListener, MixnetStream};
 use crate::mixnet::traits::MixnetMessageSender;
 use crate::{Error, Result};
 use async_trait::async_trait;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use log::{debug, error};
 use nym_client_core::client::base_client::GatewayConnection;
 use nym_client_core::client::mix_traffic::ClientRequestSender;
@@ -21,12 +21,13 @@ use nym_gateway_requests::ClientRequest;
 use nym_sphinx::addressing::clients::Recipient;
 use nym_sphinx::{params::PacketType, receiver::ReconstructedMessage};
 use nym_statistics_common::clients::{ClientStatsEvents, ClientStatsSender};
-use nym_task::connections::{ConnectionCommandSender, LaneQueueLengths};
 use nym_task::ShutdownTracker;
+use nym_task::connections::{ConnectionCommandSender, LaneQueueLengths};
+use nym_topology::path_selection::AuxiliaryRoutes;
 use nym_topology::{NymRouteProvider, NymTopology, PathSelectionStrategy};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -152,6 +153,7 @@ pub struct MixnetClient {
 
     /// Strategy used to choose mix routes for packets of a client-destination session.
     pub(crate) path_selection_strategy: PathSelectionStrategy,
+    pub(crate) auxiliary_routes: AuxiliaryRoutes,
 }
 
 impl MixnetClient {
@@ -187,6 +189,7 @@ impl MixnetClient {
             streams: None,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             path_selection_strategy: Default::default(),
+            auxiliary_routes: Default::default(),
         }
     }
 
@@ -220,6 +223,11 @@ impl MixnetClient {
     /// Get the path selection strategy this client was built with.
     pub fn path_selection_strategy(&self) -> &PathSelectionStrategy {
         &self.path_selection_strategy
+    }
+
+    /// Get the routing of acks and loop cover traffic this client was built with.
+    pub fn auxiliary_routes(&self) -> &AuxiliaryRoutes {
+        &self.auxiliary_routes
     }
 
     /// Get a child token of the root, to monitor unexpected shutdown, without causing one

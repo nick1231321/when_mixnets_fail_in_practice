@@ -8,14 +8,14 @@ use nym_crypto::asymmetric::x25519;
 use nym_sphinx_acknowledgements::AckKey;
 use nym_sphinx_acknowledgements::surb_ack::SurbAck;
 use nym_sphinx_addressing::clients::Recipient;
-use nym_sphinx_addressing::nodes::NymNodeRoutingAddress;
+use nym_sphinx_addressing::nodes::{NodeIdentity, NymNodeRoutingAddress};
 use nym_sphinx_anonymous_replies::reply_surb::ReplySurb;
 use nym_sphinx_chunking::fragment::{Fragment, FragmentIdentifier};
 use nym_sphinx_forwarding::packet::MixPacket;
 use nym_sphinx_params::packet_sizes::PacketSize;
 use nym_sphinx_params::{PacketType, ReplySurbKeyDigestAlgorithm, SphinxKeyRotation};
-use nym_sphinx_types::{Delay, NymPacket};
-use nym_topology::path_selection::{PathSelector, SharedPathSelector};
+use nym_sphinx_types::{Delay, Node as SphinxNode, NymPacket};
+use nym_topology::path_selection::{AuxiliaryRoutes, PathSelector, RouteKind, SharedPathSelector};
 use nym_topology::{NymRouteProvider, NymTopologyError, PathSelectionStrategy};
 use rand::{CryptoRng, Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -60,8 +60,8 @@ pub trait FragmentPreparer {
 
     fn deterministic_route_selection(&self) -> bool;
 
-    /// Session-aware path selector for forward packets. `None` means every packet gets an
-    /// independent, uniformly random route.
+    /// Session-aware path selector for forward packets, their acks and reply SURBs. `None`
+    /// means every packet gets an independent, uniformly random route.
     fn path_selector(&self) -> Option<&SharedPathSelector> {
         None
     }
@@ -71,26 +71,53 @@ pub trait FragmentPreparer {
     fn average_packet_delay(&self) -> Duration;
     fn average_ack_delay(&self) -> Duration;
 
+    /// Route ending at `egress` for the next `kind` packet of the session with `session`. The
+    /// mix hops are chosen by the path selector when there is one and the session is known,
+    /// otherwise uniformly at random.
+    fn route_to_egress(
+        &mut self,
+        topology: &NymRouteProvider,
+        session: Option<&Recipient>,
+        kind: RouteKind,
+        egress: NodeIdentity,
+    ) -> Result<Vec<SphinxNode>, NymTopologyError> {
+        if self.mix_hops_disabled() {
+            return topology.empty_route_to_egress(egress);
+        }
+        match (self.path_selector().cloned(), session) {
+            (Some(selector), Some(session)) => topology.route_to_egress_for_session(
+                self.rng(),
+                Some(&selector),
+                session,
+                kind,
+                egress,
+            ),
+            _ => topology.random_route_to_egress(self.rng(), egress),
+        }
+    }
+
+    /// Generates the SURB-ACK sent back to `recipient` for a packet of the session with
+    /// `session`, the destination of that packet if it is known.
     fn generate_surb_ack(
         &mut self,
         recipient: &Recipient,
+        session: Option<&Recipient>,
         fragment_id: FragmentIdentifier,
         topology: &NymRouteProvider,
         ack_key: &AckKey,
         packet_type: PacketType,
     ) -> Result<SurbAck, NymTopologyError> {
         let ack_delay = self.average_ack_delay();
-        let disable_mix_hops = self.mix_hops_disabled();
+        let route = self.route_to_egress(topology, session, RouteKind::Ack, recipient.gateway())?;
 
-        SurbAck::construct(
+        SurbAck::construct_with_route(
             self.rng(),
             recipient,
             ack_key,
             fragment_id.to_bytes(),
             ack_delay,
-            topology,
+            route,
             packet_type,
-            disable_mix_hops,
         )
     }
 
@@ -135,9 +162,10 @@ pub trait FragmentPreparer {
 
         let fragment_identifier = fragment.fragment_identifier();
 
-        // create an ack
+        // create an ack. The party we reply to is anonymous, so there is no session to route it in
         let surb_ack = self.generate_surb_ack(
             packet_sender,
+            None,
             fragment_identifier,
             topology,
             ack_key,
@@ -220,9 +248,10 @@ pub trait FragmentPreparer {
 
         let fragment_identifier = fragment.fragment_identifier();
 
-        // create an ack
+        // create an ack, routed in the session of the packet's recipient
         let surb_ack = self.generate_surb_ack(
             packet_sender,
+            Some(packet_recipient),
             fragment_identifier,
             topology,
             ack_key,
@@ -237,27 +266,24 @@ pub trait FragmentPreparer {
             Err(_e) => return Err(NymTopologyError::PayloadBuilder),
         };
 
-        // generate pseudorandom route for the packet. Unless mix hops are disabled then build an empty route.
+        // generate the route for the packet: empty if mix hops are disabled, otherwise chosen by
+        // the path selector or, without one, (deterministically) pseudorandom
         trace!("Preparing chunk for sending");
-        let route = if self.mix_hops_disabled() {
-            topology.empty_route_to_egress(destination)?
-        } else if let Some(selector) = self.path_selector().cloned() {
-            trace!("using session-aware path selection");
-            let mut selector = selector.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            topology.route_to_egress_with_selector(
-                self.rng(),
-                &mut selector,
-                packet_recipient,
-                destination,
-            )?
-        } else if self.deterministic_route_selection() {
+        let route = if self.deterministic_route_selection()
+            && !self.mix_hops_disabled()
+            && self.path_selector().is_none()
+        {
             trace!("using deterministic route selection");
             let seed = fragment_header.seed().wrapping_mul(self.nonce());
             let mut rng = ChaCha8Rng::seed_from_u64(seed as u64);
             topology.random_route_to_egress(&mut rng, destination)?
         } else {
-            trace!("using pseudorandom route selection");
-            topology.random_route_to_egress(self.rng(), destination)?
+            self.route_to_egress(
+                topology,
+                Some(packet_recipient),
+                RouteKind::Forward,
+                destination,
+            )?
         };
 
         let destination = packet_recipient.as_sphinx_destination();
@@ -370,15 +396,18 @@ where
         }
     }
 
-    /// Use the given strategy to choose forward routes for packets of each client-destination session.
-    pub fn with_path_selection_strategy(mut self, strategy: PathSelectionStrategy) -> Self {
-        self.path_selector = match strategy {
-            PathSelectionStrategy::Baseline => None,
-            strategy => {
-                info!("[path-selection] forward routes will use {strategy:?}");
-                Some(PathSelector::new_shared(strategy))
-            }
-        };
+    /// Use the given strategy to choose the routes of packets of each client-destination session.
+    pub fn with_path_selection_strategy(self, strategy: PathSelectionStrategy) -> Self {
+        self.with_path_selector(PathSelector::new_shared_for(
+            strategy,
+            AuxiliaryRoutes::default(),
+        ))
+    }
+
+    /// Use the given selector, possibly shared with other packet senders of this client, to choose
+    /// the routes of packets of each client-destination session.
+    pub fn with_path_selector(mut self, path_selector: Option<SharedPathSelector>) -> Self {
+        self.path_selector = path_selector;
         self
     }
 
@@ -387,24 +416,32 @@ where
         self.sender_address = sender_address;
     }
 
+    /// Generates `amount` reply SURBs to hand to `recipient`, routed in its session.
     pub fn generate_reply_surbs(
         &mut self,
         amount: usize,
         topology: &NymRouteProvider,
+        recipient: &Recipient,
     ) -> Result<Vec<ReplySurbWithKeyRotation>, NymTopologyError> {
         let mut reply_surbs = Vec::with_capacity(amount);
-        let disabled_mix_hops = self.mix_hops_disabled();
+        let sender_address = self.sender_address;
 
         let key_rotation = SphinxKeyRotation::from(topology.current_key_rotation());
 
         for _ in 0..amount {
-            let reply_surb = ReplySurb::construct(
-                &mut self.rng,
-                &self.sender_address,
-                self.average_packet_delay,
+            let route = <Self as FragmentPreparer>::route_to_egress(
+                self,
                 topology,
-                disabled_mix_hops,
-            )?
+                Some(recipient),
+                RouteKind::ReplySurb,
+                sender_address.gateway(),
+            )?;
+            let reply_surb = ReplySurb::construct_with_route(
+                &mut self.rng,
+                &sender_address,
+                self.average_packet_delay,
+                route,
+            )
             .with_key_rotation(key_rotation);
             reply_surbs.push(reply_surb)
         }
@@ -466,6 +503,7 @@ where
         <Self as FragmentPreparer>::generate_surb_ack(
             self,
             &sender,
+            None,
             fragment_id,
             topology,
             ack_key,
