@@ -103,7 +103,7 @@ services:
   topology:
     <<: *node
     container_name: nym-topology
-    restart: "no"
+    # keeps network.json in sync with the nodes' rotating sphinx keys
     depends_on: [mix1, mix2, mix3, mix4, mix5, mix6, mix7, mix8, mix9, gateway, gateway2]
     command:
       - sh
@@ -112,7 +112,7 @@ services:
         for f in mix1 mix2 mix3 mix4 mix5 mix6 mix7 mix8 mix9 gateway gateway2; do
           while [ ! -f /localnet/$$f.json ]; do echo "waiting for $$f.json"; sleep 1; done
         done
-        [ -f /localnet/network.json ] || python3 /usr/local/bin/localnet_topology.py /localnet
+        exec python3 -u /usr/local/bin/localnet_topology.py /localnet --watch
 
 volumes:
   nym-home:
