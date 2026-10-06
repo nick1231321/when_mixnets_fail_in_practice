@@ -1,9 +1,9 @@
 //! Self-test with the path selection strategy chosen on the command line.
 //!
-//! Usage: nym-self-test [network.json] [--size BYTES] [--ack-routing ROUTING] [--cover-routing ROUTING] [--strategy <STRATEGY>]
+//! Usage: nym-self-test [network.json] [--size BYTES] [--real-routing R] [--real-ack-routing R] [--cover-routing R] [--cover-ack-routing R] [--strategy <STRATEGY>]
 //!
 //! STRATEGY: baseline (default) | khf:1,2 | kw:10 | alpha:0.8
-//! ROUTING: strategy (default) | baseline; see the library docs.
+//! R (routing): strategy (default) | baseline; see README.md.
 //! See the strategy-specific binaries (nym-self-test-{baseline,khf,kw,alpha}) for details.
 
 use std::process::ExitCode;

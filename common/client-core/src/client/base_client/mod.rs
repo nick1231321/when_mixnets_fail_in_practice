@@ -54,7 +54,7 @@ use nym_statistics_common::clients::ClientStatsSender;
 use nym_statistics_common::generate_client_stats_id;
 use nym_task::ShutdownTracker;
 use nym_task::connections::{ConnectionCommandReceiver, ConnectionCommandSender, LaneQueueLengths};
-use nym_topology::path_selection::{AuxiliaryRoutes, PathSelector, SharedPathSelector};
+use nym_topology::path_selection::{PathSelector, RoutingConfig, SharedPathSelector};
 use nym_topology::provider_trait::TopologyProvider;
 use nym_topology::{HardcodedTopologyProvider, PathSelectionStrategy};
 use nym_validator_client::nym_api::NymApiClientExt;
@@ -235,7 +235,7 @@ pub struct BaseClientBuilder<C, S: MixnetClientStorage> {
     derivation_material: Option<DerivationMaterial>,
 
     path_selection_strategy: PathSelectionStrategy,
-    auxiliary_routes: AuxiliaryRoutes,
+    routing_config: RoutingConfig,
 }
 
 impl<C, S> BaseClientBuilder<C, S>
@@ -266,7 +266,7 @@ where
             connection_fd_callback: None,
             derivation_material: None,
             path_selection_strategy: PathSelectionStrategy::Baseline,
-            auxiliary_routes: AuxiliaryRoutes::default(),
+            routing_config: RoutingConfig::default(),
         }
     }
 
@@ -277,11 +277,11 @@ where
         self
     }
 
-    /// Set whether acks of data packets and loop cover traffic follow the path selection strategy
-    /// or get independent uniform routes.
+    /// Set, per traffic class (real, real acks, cover, cover acks), whether routes follow the path
+    /// selection strategy or are independent and uniformly random.
     #[must_use]
-    pub fn with_auxiliary_routes(mut self, auxiliary_routes: AuxiliaryRoutes) -> Self {
-        self.auxiliary_routes = auxiliary_routes;
+    pub fn with_routing_config(mut self, routing_config: RoutingConfig) -> Self {
+        self.routing_config = routing_config;
         self
     }
 
@@ -1157,11 +1157,9 @@ where
 
         // One selector for every packet sender of this client, so that forward packets, their
         // acks, reply SURBs and loop cover traffic all route within the same sessions (unless
-        // the auxiliary routes take acks or cover traffic out of them).
-        let path_selector = PathSelector::new_shared_for(
-            self.path_selection_strategy.clone(),
-            self.auxiliary_routes,
-        );
+        // the routing config takes a traffic class out of them).
+        let path_selector =
+            PathSelector::new_shared_for(self.path_selection_strategy.clone(), self.routing_config);
 
         let controller_config = real_messages_control::Config::new(
             &self.config.debug,

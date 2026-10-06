@@ -25,7 +25,7 @@ use nym_client_core::init::types::{GatewaySelectionSpecification, GatewaySetup};
 use nym_client_core::init::{refresh_gateway_published_data, setup_gateway};
 use nym_crypto::hkdf::DerivationMaterial;
 use nym_task::ShutdownTracker;
-use nym_topology::path_selection::{AuxiliaryRoutes, AuxiliaryRouting};
+use nym_topology::path_selection::{Routing, RoutingConfig};
 use nym_topology::provider_trait::TopologyProvider;
 use nym_topology::{PathSelectionStrategy, RoutingNode};
 use nym_validator_client::{QueryHttpRpcNyxdClient, UserAgent, nyxd};
@@ -107,7 +107,7 @@ pub struct MixnetClientBuilder<S: MixnetClientStorage = Ephemeral> {
     derivation_material: Option<DerivationMaterial>,
     stream_idle_timeout: Option<std::time::Duration>,
     path_selection_strategy: PathSelectionStrategy,
-    auxiliary_routes: AuxiliaryRoutes,
+    routing_config: RoutingConfig,
 }
 
 impl MixnetClientBuilder<Ephemeral> {
@@ -155,7 +155,7 @@ impl MixnetClientBuilder<OnDiskPersistent> {
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
-            auxiliary_routes: Default::default(),
+            routing_config: Default::default(),
         })
     }
 }
@@ -191,7 +191,7 @@ where
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
-            auxiliary_routes: Default::default(),
+            routing_config: Default::default(),
         }
     }
 
@@ -222,7 +222,7 @@ where
             derivation_material: self.derivation_material,
             stream_idle_timeout: self.stream_idle_timeout,
             path_selection_strategy: self.path_selection_strategy,
-            auxiliary_routes: self.auxiliary_routes,
+            routing_config: self.routing_config,
         }
     }
 
@@ -271,19 +271,35 @@ where
         self
     }
 
-    /// Set whether the SURB-ACKs of data packets follow the path selection strategy (default)
-    /// or get independent uniform routes.
+    /// Set whether real traffic (forward data packets and the reply SURBs they carry) follows
+    /// the path selection strategy (default) or gets independent uniform routes.
     #[must_use]
-    pub fn ack_routing(mut self, routing: AuxiliaryRouting) -> Self {
-        self.auxiliary_routes.ack = routing;
+    pub fn real_routing(mut self, routing: Routing) -> Self {
+        self.routing_config.real = routing;
         self
     }
 
-    /// Set whether loop cover packets and their SURB-ACKs follow the path selection strategy
+    /// Set whether the SURB-ACKs of real data packets follow the path selection strategy
     /// (default) or get independent uniform routes.
     #[must_use]
-    pub fn cover_routing(mut self, routing: AuxiliaryRouting) -> Self {
-        self.auxiliary_routes.cover = routing;
+    pub fn real_ack_routing(mut self, routing: Routing) -> Self {
+        self.routing_config.real_ack = routing;
+        self
+    }
+
+    /// Set whether loop cover packets follow the path selection strategy (default) or get
+    /// independent uniform routes.
+    #[must_use]
+    pub fn cover_routing(mut self, routing: Routing) -> Self {
+        self.routing_config.cover = routing;
+        self
+    }
+
+    /// Set whether the SURB-ACKs of loop cover packets follow the path selection strategy
+    /// (default) or get independent uniform routes.
+    #[must_use]
+    pub fn cover_ack_routing(mut self, routing: Routing) -> Self {
+        self.routing_config.cover_ack = routing;
         self
     }
 
@@ -476,7 +492,7 @@ where
         client.derivation_material = self.derivation_material;
         client.stream_idle_timeout = self.stream_idle_timeout;
         client.path_selection_strategy = self.path_selection_strategy;
-        client.auxiliary_routes = self.auxiliary_routes;
+        client.routing_config = self.routing_config;
         Ok(client)
     }
 }
@@ -553,7 +569,7 @@ where
 
     stream_idle_timeout: Option<std::time::Duration>,
     path_selection_strategy: PathSelectionStrategy,
-    auxiliary_routes: AuxiliaryRoutes,
+    routing_config: RoutingConfig,
 }
 
 impl<S> DisconnectedMixnetClient<S>
@@ -614,7 +630,7 @@ where
             derivation_material: None,
             stream_idle_timeout: None,
             path_selection_strategy: Default::default(),
-            auxiliary_routes: Default::default(),
+            routing_config: Default::default(),
         })
     }
 
@@ -909,7 +925,7 @@ where
                 .with_derivation_material(self.derivation_material)
                 .with_nym_api_urls(self.config.network_details.nym_api_urls())
                 .with_path_selection_strategy(self.path_selection_strategy.clone())
-                .with_auxiliary_routes(self.auxiliary_routes);
+                .with_routing_config(self.routing_config);
 
         if let Some(user_agent) = self.user_agent {
             base_builder = base_builder.with_user_agent(user_agent);
@@ -1033,7 +1049,7 @@ where
         }
         let stream_idle_timeout = self.stream_idle_timeout;
         let path_selection_strategy = self.path_selection_strategy.clone();
-        let auxiliary_routes = self.auxiliary_routes;
+        let routing_config = self.routing_config;
         let (mut started_client, nym_address) = self.connect_to_mixnet_common().await?;
         let client_input = started_client.client_input.register_producer();
         let mut client_output = started_client.client_output.register_consumer();
@@ -1061,7 +1077,7 @@ where
             client.stream_idle_timeout = timeout;
         }
         client.path_selection_strategy = path_selection_strategy;
-        client.auxiliary_routes = auxiliary_routes;
+        client.routing_config = routing_config;
         Ok(client)
     }
 }
@@ -1115,31 +1131,37 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_routes_are_passed_to_built_client() {
+    fn routing_config_is_passed_to_built_client() {
         let default_client = MixnetClientBuilder::new_ephemeral().build().unwrap();
-        assert_eq!(default_client.auxiliary_routes, AuxiliaryRoutes::default());
+        assert_eq!(default_client.routing_config, RoutingConfig::default());
 
         let client = MixnetClientBuilder::new_ephemeral()
-            .ack_routing(AuxiliaryRouting::Baseline)
+            .real_routing(Routing::Baseline)
+            .cover_ack_routing(Routing::Baseline)
             .build()
             .unwrap();
         assert_eq!(
-            client.auxiliary_routes,
-            AuxiliaryRoutes {
-                ack: AuxiliaryRouting::Baseline,
-                cover: AuxiliaryRouting::FollowStrategy,
+            client.routing_config,
+            RoutingConfig {
+                real: Routing::Baseline,
+                real_ack: Routing::Strategy,
+                cover: Routing::Strategy,
+                cover_ack: Routing::Baseline,
             }
         );
 
         let client = MixnetClientBuilder::new_ephemeral()
-            .cover_routing(AuxiliaryRouting::Baseline)
+            .real_ack_routing(Routing::Baseline)
+            .cover_routing(Routing::Baseline)
             .build()
             .unwrap();
         assert_eq!(
-            client.auxiliary_routes,
-            AuxiliaryRoutes {
-                ack: AuxiliaryRouting::FollowStrategy,
-                cover: AuxiliaryRouting::Baseline,
+            client.routing_config,
+            RoutingConfig {
+                real: Routing::Strategy,
+                real_ack: Routing::Baseline,
+                cover: Routing::Baseline,
+                cover_ack: Routing::Strategy,
             }
         );
     }

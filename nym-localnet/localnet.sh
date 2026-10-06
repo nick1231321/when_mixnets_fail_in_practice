@@ -18,5 +18,6 @@ case "${1:-help}" in
   logs)  shift; docker compose logs -f "$@" ;;
   ps)    docker compose ps ;;
   test)  cargo run --release --manifest-path self-test/Cargo.toml -- data/network.json ;;
-  *)     echo "Usage: $0 {build|up|down|logs [service]|ps|test}" ;;
+  verify) shift; python3 verify_path_selection.py "$@" ;;
+  *)     echo "Usage: $0 {build|up|down|logs [service]|ps|test|verify [--quick] [--only NAME] [-v]}" ;;
 esac

@@ -1,7 +1,7 @@
 //! Self-test with K-Hops Fixed (K-HF): the nodes on the given layers are sampled once per
 //! session and reused by every packet; the other layers are sampled per packet.
 //!
-//! Usage: nym-self-test-khf [network.json] [--size BYTES] [--ack-routing ROUTING] [--cover-routing ROUTING] [--layers LAYERS]
+//! Usage: nym-self-test-khf [network.json] [--size BYTES] [--real-routing R] [--real-ack-routing R] [--cover-routing R] [--cover-ack-routing R] [--layers LAYERS]
 //!
 //! --layers LAYERS   comma-separated fixed layers, 1-3 (default: 1)
 

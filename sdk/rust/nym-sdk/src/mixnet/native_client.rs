@@ -23,7 +23,7 @@ use nym_sphinx::{params::PacketType, receiver::ReconstructedMessage};
 use nym_statistics_common::clients::{ClientStatsEvents, ClientStatsSender};
 use nym_task::ShutdownTracker;
 use nym_task::connections::{ConnectionCommandSender, LaneQueueLengths};
-use nym_topology::path_selection::AuxiliaryRoutes;
+use nym_topology::path_selection::RoutingConfig;
 use nym_topology::{NymRouteProvider, NymTopology, PathSelectionStrategy};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -153,7 +153,7 @@ pub struct MixnetClient {
 
     /// Strategy used to choose mix routes for packets of a client-destination session.
     pub(crate) path_selection_strategy: PathSelectionStrategy,
-    pub(crate) auxiliary_routes: AuxiliaryRoutes,
+    pub(crate) routing_config: RoutingConfig,
 }
 
 impl MixnetClient {
@@ -189,7 +189,7 @@ impl MixnetClient {
             streams: None,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             path_selection_strategy: Default::default(),
-            auxiliary_routes: Default::default(),
+            routing_config: Default::default(),
         }
     }
 
@@ -225,9 +225,9 @@ impl MixnetClient {
         &self.path_selection_strategy
     }
 
-    /// Get the routing of acks and loop cover traffic this client was built with.
-    pub fn auxiliary_routes(&self) -> &AuxiliaryRoutes {
-        &self.auxiliary_routes
+    /// Get the routing of each traffic class this client was built with.
+    pub fn routing_config(&self) -> &RoutingConfig {
+        &self.routing_config
     }
 
     /// Get a child token of the root, to monitor unexpected shutdown, without causing one

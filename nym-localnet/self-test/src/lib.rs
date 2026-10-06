@@ -7,10 +7,12 @@
 //!   --size BYTES             size of the message sent to ourselves (default: a short
 //!                            greeting). Each sphinx packet carries ~2 KB, so e.g. 100000
 //!                            spreads the message over ~50 packets of the same session.
-//!   --ack-routing ROUTING    routes of the SURB-ACKs of data packets: `strategy` (default,
-//!                            same session as the data) or `baseline` (uniformly random)
-//!   --cover-routing ROUTING  routes of loop cover packets and their SURB-ACKs: `strategy`
-//!                            (default, session of our own address) or `baseline`
+//!   --real-routing ROUTING       real traffic: forward data packets and their reply SURBs
+//!   --real-ack-routing ROUTING   SURB-ACKs of real data packets
+//!   --cover-routing ROUTING      loop cover packets
+//!   --cover-ack-routing ROUTING  SURB-ACKs of loop cover packets
+//!                                ROUTING is `strategy` (default) or `baseline` (uniformly
+//!                                random route, leaving the session untouched)
 //!
 //! plus the parameter of its path selection strategy (see "When Mixnets Fail", NDSS 2026).
 //!
@@ -18,7 +20,7 @@
 //! info level (shown by default) and every chosen route at debug level, e.g.
 //!   RUST_LOG=warn,nym_topology::path_selection=debug nym-self-test-khf --layers 1,2
 
-use nym_sdk::mixnet::{self, AuxiliaryRoutes, MixnetMessageSender, PathSelectionStrategy};
+use nym_sdk::mixnet::{self, MixnetMessageSender, PathSelectionStrategy, Routing, RoutingConfig};
 use nym_topology::provider_trait::{async_trait, TopologyProvider};
 use nym_topology::NymTopology;
 use std::path::PathBuf;
@@ -64,7 +66,7 @@ struct Args {
     topology_path: String,
     strategy_arg: Option<String>,
     message_size: Option<usize>,
-    auxiliary_routes: AuxiliaryRoutes,
+    routing_config: RoutingConfig,
 }
 
 /// Entry point of a self-test binary. `strategy_flag` is the command line flag carrying the
@@ -95,7 +97,7 @@ pub fn run(strategy_flag: Option<&str>, strategy_from_arg: StrategyFromArg) -> E
         .block_on(self_test(
             args.topology_path,
             strategy,
-            args.auxiliary_routes,
+            args.routing_config,
             args.message_size,
         ))
 }
@@ -103,7 +105,7 @@ pub fn run(strategy_flag: Option<&str>, strategy_from_arg: StrategyFromArg) -> E
 async fn self_test(
     topology_path: String,
     strategy: PathSelectionStrategy,
-    auxiliary_routes: AuxiliaryRoutes,
+    routing_config: RoutingConfig,
     message_size: Option<usize>,
 ) -> ExitCode {
     let provider = match FileTopologyProvider::new(&topology_path) {
@@ -117,8 +119,10 @@ async fn self_test(
     let mut client = match mixnet::MixnetClientBuilder::new_ephemeral()
         .custom_topology_provider(Box::new(provider))
         .path_selection_strategy(strategy)
-        .ack_routing(auxiliary_routes.ack)
-        .cover_routing(auxiliary_routes.cover)
+        .real_routing(routing_config.real)
+        .real_ack_routing(routing_config.real_ack)
+        .cover_routing(routing_config.cover)
+        .cover_ack_routing(routing_config.cover_ack)
         .build()
         .expect("failed to build client")
         .connect_to_mixnet()
@@ -137,11 +141,7 @@ async fn self_test(
         "Path selection strategy: {:?}",
         client.path_selection_strategy()
     );
-    let routes = client.auxiliary_routes();
-    println!(
-        "Ack routing: {:?}, cover routing: {:?}",
-        routes.ack, routes.cover
-    );
+    println!("Routing: {}", client.routing_config());
 
     let greeting = format!("hello from the localnet self-test @ {:?}", Instant::now());
     let payload = match message_size {
@@ -193,7 +193,7 @@ fn parse_args(
         topology_path: "data/network.json".to_string(),
         strategy_arg: None,
         message_size: None,
-        auxiliary_routes: AuxiliaryRoutes::default(),
+        routing_config: RoutingConfig::default(),
     };
 
     while let Some(arg) = args.next() {
@@ -205,12 +205,9 @@ fn parse_args(
                 Ok(size) if size > 0 => parsed.message_size = Some(size),
                 _ => return Err(format!("invalid size '{value}'")),
             }
-        } else if arg == "--ack-routing" {
-            let value = args.next().ok_or("--ack-routing requires a value")?;
-            parsed.auxiliary_routes.ack = value.parse()?;
-        } else if arg == "--cover-routing" {
-            let value = args.next().ok_or("--cover-routing requires a value")?;
-            parsed.auxiliary_routes.cover = value.parse()?;
+        } else if let Some(routing) = routing_flag(&mut parsed.routing_config, &arg) {
+            let value = args.next().ok_or(format!("{arg} requires a value"))?;
+            *routing = value.parse()?;
         } else if arg.starts_with("--") {
             return Err(format!("unknown option '{arg}'"));
         } else {
@@ -218,6 +215,17 @@ fn parse_args(
         }
     }
     Ok(parsed)
+}
+
+/// The routing that `flag` sets, if it is one of the routing flags.
+fn routing_flag<'a>(config: &'a mut RoutingConfig, flag: &str) -> Option<&'a mut Routing> {
+    match flag {
+        "--real-routing" => Some(&mut config.real),
+        "--real-ack-routing" => Some(&mut config.real_ack),
+        "--cover-routing" => Some(&mut config.cover),
+        "--cover-ack-routing" => Some(&mut config.cover_ack),
+        _ => None,
+    }
 }
 
 /// K-HF: comma-separated mix layers (1-3) whose node is fixed for the session, e.g. `1,2`.
@@ -266,7 +274,6 @@ pub fn any_strategy(value: &str) -> Result<PathSelectionStrategy, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nym_sdk::mixnet::AuxiliaryRouting;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
         parse_args(args.iter().map(|arg| arg.to_string()), Some("--layers"))
@@ -275,26 +282,55 @@ mod tests {
     #[test]
     fn routing_flags_default_to_the_strategy() {
         let args = parse(&["--layers", "1,2"]).unwrap();
-        assert_eq!(args.auxiliary_routes, AuxiliaryRoutes::default());
+        assert_eq!(args.routing_config, RoutingConfig::default());
     }
 
     #[test]
     fn routing_flags_are_parsed() {
-        let args = parse(&["--ack-routing", "baseline", "--cover-routing", "strategy"]).unwrap();
-        assert_eq!(args.auxiliary_routes.ack, AuxiliaryRouting::Baseline);
+        let args = parse(&[
+            "--real-routing",
+            "baseline",
+            "--real-ack-routing",
+            "strategy",
+            "--cover-routing",
+            "baseline",
+            "--cover-ack-routing",
+            "strategy",
+        ])
+        .unwrap();
         assert_eq!(
-            args.auxiliary_routes.cover,
-            AuxiliaryRouting::FollowStrategy
+            args.routing_config,
+            RoutingConfig {
+                real: Routing::Baseline,
+                real_ack: Routing::Strategy,
+                cover: Routing::Baseline,
+                cover_ack: Routing::Strategy,
+            }
         );
 
-        let args = parse(&["--cover-routing", "baseline"]).unwrap();
-        assert_eq!(args.auxiliary_routes.ack, AuxiliaryRouting::FollowStrategy);
-        assert_eq!(args.auxiliary_routes.cover, AuxiliaryRouting::Baseline);
+        let args = parse(&[
+            "--real-ack-routing",
+            "baseline",
+            "--cover-ack-routing",
+            "baseline",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.routing_config,
+            RoutingConfig {
+                real: Routing::Strategy,
+                real_ack: Routing::Baseline,
+                cover: Routing::Strategy,
+                cover_ack: Routing::Baseline,
+            }
+        );
     }
 
     #[test]
     fn invalid_routing_is_rejected() {
-        assert!(parse(&["--ack-routing", "random"]).is_err());
-        assert!(parse(&["--cover-routing"]).is_err());
+        assert!(parse(&["--real-routing", "random"]).is_err());
+        assert!(parse(&["--cover-ack-routing"]).is_err());
+        // the old two-flag interface is gone
+        assert!(parse(&["--ack-routing", "baseline"]).is_err());
     }
 }

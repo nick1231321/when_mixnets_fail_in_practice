@@ -15,7 +15,7 @@ use nym_sphinx_forwarding::packet::MixPacket;
 use nym_sphinx_params::packet_sizes::PacketSize;
 use nym_sphinx_params::{PacketType, ReplySurbKeyDigestAlgorithm, SphinxKeyRotation};
 use nym_sphinx_types::{Delay, Node as SphinxNode, NymPacket};
-use nym_topology::path_selection::{AuxiliaryRoutes, PathSelector, RouteKind, SharedPathSelector};
+use nym_topology::path_selection::{PathSelector, RouteKind, RoutingConfig, SharedPathSelector};
 use nym_topology::{NymRouteProvider, NymTopologyError, PathSelectionStrategy};
 use rand::{CryptoRng, Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -108,7 +108,8 @@ pub trait FragmentPreparer {
         packet_type: PacketType,
     ) -> Result<SurbAck, NymTopologyError> {
         let ack_delay = self.average_ack_delay();
-        let route = self.route_to_egress(topology, session, RouteKind::Ack, recipient.gateway())?;
+        let route =
+            self.route_to_egress(topology, session, RouteKind::RealAck, recipient.gateway())?;
 
         SurbAck::construct_with_route(
             self.rng(),
@@ -281,7 +282,7 @@ pub trait FragmentPreparer {
             self.route_to_egress(
                 topology,
                 Some(packet_recipient),
-                RouteKind::Forward,
+                RouteKind::Real,
                 destination,
             )?
         };
@@ -400,7 +401,7 @@ where
     pub fn with_path_selection_strategy(self, strategy: PathSelectionStrategy) -> Self {
         self.with_path_selector(PathSelector::new_shared_for(
             strategy,
-            AuxiliaryRoutes::default(),
+            RoutingConfig::default(),
         ))
     }
 
