@@ -30,6 +30,7 @@ cargo build --release --manifest-path self-test/Cargo.toml
 | `./localnet.sh down` | Stops it and deletes its state (`data/`). |
 | `./localnet.sh ps` / `logs [service]` | Container status / logs. |
 | `./localnet.sh test` | Runs the default self-test once. |
+| `./localnet.sh heal` | Starts stopped nodes and restarts nodes stuck in an old network namespace (see below). |
 | `./localnet.sh verify [...]` | Runs the verification script (see [Verifying the routing](#verifying-the-routing)). |
 
 Path selection is implemented in the client only. After changing it, rebuild the self-test
@@ -37,6 +38,22 @@ Path selection is implemented in the client only. After changing it, rebuild the
 
 The `topology` container rewrites `data/network.json` whenever the nodes rotate their sphinx
 keys, and the self-test reloads it on every topology refresh.
+
+### Containers and restarts
+
+All nodes share one network namespace (they talk to each other over `127.0.0.1` on their own
+ports). The namespace and the published ports belong to `nym-netns`, a container that only
+sleeps, not to one of the nodes. Docker restarts each node on its own if it exits (all nodes
+currently exit once a day, right after their sphinx key rotation), and it rejoins the same
+namespace.
+
+If `nym-netns` itself restarts, for example after Docker or the computer restarts, the nodes
+are left in its old namespace: they keep running but can no longer reach each other or the
+host. Run `./localnet.sh heal` to restart them into the new namespace. It also starts any
+stopped node, and does nothing when everything is fine.
+
+Node packet counters (`/api/v1/metrics/packets-stats`) are kept in memory and reset whenever a
+node restarts.
 
 ## The self-test
 

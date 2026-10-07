@@ -1,6 +1,14 @@
 # Nym localnet on Docker: 9 mixnodes (3 per layer) + 2 gateways sharing one network
-# namespace. Everything announces 127.0.0.1; ports are published to the host from mix1.
+# namespace. Everything announces 127.0.0.1; ports are published to the host from `netns`.
 # Layout must match docker/node.sh and docker/build_topology.py.
+#
+# The shared namespace is owned by `netns`, a container that only sleeps, rather than by one
+# of the nodes. Docker does not order restarts of containers sharing a namespace: when the
+# owner was a node, a node restarting while the owner was restarting failed for good
+# ("cannot join network namespace ... is restarting"), and an owner restarting alone left
+# the other nodes in its old namespace. With a holder that never exits, every node restarts
+# on its own into the same namespace. `./localnet.sh heal` repairs the remaining case of the
+# holder itself restarting (e.g. after a Docker restart).
 x-node: &node
   image: nym-localnet:latest
   volumes:
@@ -11,13 +19,14 @@ x-node: &node
   restart: unless-stopped
 
 services:
-  mix1:
-    <<: *node
+  netns:
+    image: nym-localnet:latest
     build:
       context: ..
       dockerfile: nym-localnet/docker/Dockerfile
-    container_name: nym-mix1
-    command: ["nym-localnet-node.sh", "mix", "mix1", "1"]
+    container_name: nym-netns
+    command: ["sleep", "infinity"]
+    init: true # so that `sleep` exits promptly on `docker compose stop`
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     ports:
@@ -25,68 +34,76 @@ services:
       - "127.0.0.1:10001-10011:10001-10011"
       - "127.0.0.1:20001-20011:20001-20011"
       - "127.0.0.1:30001-30011:30001-30011"
+    restart: unless-stopped
+
+  mix1:
+    <<: *node
+    container_name: nym-mix1
+    network_mode: "service:netns"
+    depends_on: [netns]
+    command: ["nym-localnet-node.sh", "mix", "mix1", "1"]
 
   mix2:
     <<: *node
     container_name: nym-mix2
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix2", "2"]
 
   mix3:
     <<: *node
     container_name: nym-mix3
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix3", "3"]
 
   mix4:
     <<: *node
     container_name: nym-mix4
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix4", "4"]
 
   mix5:
     <<: *node
     container_name: nym-mix5
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix5", "5"]
 
   mix6:
     <<: *node
     container_name: nym-mix6
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix6", "6"]
 
   mix7:
     <<: *node
     container_name: nym-mix7
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix7", "7"]
 
   mix8:
     <<: *node
     container_name: nym-mix8
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix8", "8"]
 
   mix9:
     <<: *node
     container_name: nym-mix9
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     command: ["nym-localnet-node.sh", "mix", "mix9", "9"]
 
   gateway:
     <<: *node
     container_name: nym-gateway
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     command: ["nym-localnet-node.sh", "gateway", "gateway", "10"]
@@ -94,8 +111,8 @@ services:
   gateway2:
     <<: *node
     container_name: nym-gateway2
-    network_mode: "service:mix1"
-    depends_on: [mix1]
+    network_mode: "service:netns"
+    depends_on: [netns]
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     command: ["nym-localnet-node.sh", "gateway", "gateway2", "11"]
