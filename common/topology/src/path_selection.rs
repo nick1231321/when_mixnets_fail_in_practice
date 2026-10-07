@@ -327,6 +327,9 @@ impl PathSelector {
         let layers = all_layer_nodes(topology)?;
         let label = session_label(recipient);
 
+        // Both checks below return a random route without touching the session. They are kept
+        // apart only so that each prints its own message: the first is a selector without a
+        // strategy (Baseline), the second is a traffic class configured as baseline.
         if matches!(self.strategy, PathSelectionStrategy::Baseline) {
             let path = random_path(rng, &layers);
             debug!("[path-selection] session {label} ({kind}): baseline route {path:?}");
