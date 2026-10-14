@@ -23,6 +23,7 @@ pub const MIN_PADDING_OVERHEAD: usize = 1;
 // For instance there are not tests for the cases when we are padding the message
 
 pub mod fragment;
+pub mod instrumentation;
 pub mod reconstruction;
 pub mod set;
 

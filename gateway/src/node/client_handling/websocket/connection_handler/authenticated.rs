@@ -152,6 +152,9 @@ pub(crate) struct AuthenticatedHandler<R, S> {
     // senders that are used to return the result of the ping to the handler requesting the ping.
     is_active_request_receiver: IsActiveRequestReceiver,
     is_active_ping_pending_reply: Option<(u64, IsActiveResultSender)>,
+    // [`instrumentation::identity_tag`] of this client, used to label its packets in the gateway
+    // wire log (active only when MIXCORR_WIRE_DIR is set, for flow-matching experiments)
+    wire_tag: u64,
 }
 
 // explicitly remove handle from the global store upon being dropped
@@ -206,6 +209,7 @@ impl<R, S> AuthenticatedHandler<R, S> {
                 fresh.shared_state.cfg.bandwidth,
                 fresh.shared_state.cfg.enforce_zk_nym,
             ),
+            wire_tag: nym_sphinx::chunking::instrumentation::identity_tag(&client.address.as_bytes()),
             inner: fresh,
             client,
             mix_receiver,
@@ -340,6 +344,13 @@ impl<R, S> AuthenticatedHandler<R, S> {
         mix_packet: MixPacket,
     ) -> Result<ServerResponse, RequestHandlingError> {
         let required_bandwidth = mix_packet.packet().len() as i64;
+
+        // wire log: a packet crossed the client -> gateway link (flow-matching experiments)
+        nym_sphinx::chunking::instrumentation::wire_log(
+            true,
+            self.wire_tag,
+            mix_packet.packet().len(),
+        );
 
         let upgrade_mode = self.upgrade_mode_enabled();
 
@@ -679,6 +690,12 @@ impl<R, S> AuthenticatedHandler<R, S> {
                         }
                         Some(mix_messages) => mix_messages,
                     };
+                    // wire log: packets crossing the gateway -> client link (flow-matching experiments)
+                    if nym_sphinx::chunking::instrumentation::wire_enabled() {
+                        for packet in &mix_messages {
+                            nym_sphinx::chunking::instrumentation::wire_log(false, self.wire_tag, packet.len());
+                        }
+                    }
                     if let Err(err) = self.inner.push_packets_to_client(&self.client.shared_keys, mix_messages).await {
                         debug!("failed to send the unwrapped sphinx packets back to the client - {err}, assuming the connection is dead");
                         break;
