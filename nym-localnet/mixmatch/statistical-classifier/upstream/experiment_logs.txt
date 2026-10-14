@@ -1,0 +1,64 @@
+Experiments using the exact likelihood computation algorithm.
+The number of sequences is always 100.
+
+Length 4 sequences experiment
+-----------------------------
+Generating input times sequences
+Progress: 100.00%. Done!
+Generating output times sequences by applying MixNet delays
+Progress: 100.00%. Done!
+Computing loglikelihoods
+Progress: 100.00%. Finished!
+Matching performance of experiment with sequences length 4:
+	False Match Rate:     31.00%
+	False Non Match Rate: 31.00%
+
+
+Length 5 sequences experiment
+-----------------------------
+Generating input times sequences
+Progress: 100.00%. Done!
+Generating output times sequences by applying MixNet delays
+Progress: 100.00%. Done!
+Computing loglikelihoods
+Progress: 100.00%. Finished!
+Matching performance of experiment with sequences length 5:
+	False Match Rate:     29.00%
+	False Non Match Rate: 29.00%
+
+
+Length 6 sequences experiment
+-----------------------------
+Generating input times sequences
+Progress: 100.00%. Done!
+Generating output times sequences by applying MixNet delays
+Progress: 100.00%. Done!
+Computing loglikelihoods
+Progress: 100.00%. Finished!
+Matching performance of experiment with sequences length 6:
+	False Match Rate:     26.88%
+	False Non Match Rate: 26.00%
+
+Length 7 sequences experiment
+-----------------------------
+Generating input times sequences
+Progress: 100.00%. Done!
+Generating output times sequences by applying MixNet delays
+Progress: 100.00%. Done!
+Computing loglikelihoods
+Progress: 100.00%. Finished!
+Matching performance of experiment with sequences length 7:
+	False Match Rate:     24.07%
+	False Non Match Rate: 25.00%
+
+Length 8 sequences experiment
+-----------------------------
+Generating input times sequences
+Progress: 100.00%. Done!
+Generating output times sequences by applying MixNet delays
+Progress: 100.00%. Done!
+Computing loglikelihoods
+Progress: 100.00%. Finished!
+Matching performance of experiment with sequences length 8:
+	False Match Rate:     23.92%
+	False Non Match Rate: 24.00%

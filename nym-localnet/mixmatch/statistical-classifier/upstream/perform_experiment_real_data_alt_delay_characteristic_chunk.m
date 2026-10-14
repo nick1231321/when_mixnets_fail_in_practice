@@ -1,0 +1,3 @@
+function perform_experiment_real_data_alt_delay_characteristic_chunk(client_subset_index, client_subsets_count, data_path, results_path, database_id)
+  perform_experiment_real_data_alt_delay_characteristic(client_subset_index, client_subsets_count, data_path, results_path, database_id);
+endfunction
