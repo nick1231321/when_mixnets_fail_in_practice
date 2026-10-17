@@ -237,7 +237,8 @@ def run_one(row, out, capture, timeout_s, extract=False, keep_pcap=True):
     env = {k: v for k, v in os.environ.items() if k != 'MIXCORR_WIRE_DIR'}   # the clients log nothing
     cmd = [sys.executable, str(LOCAL / 'resmon/resmon.py'), 'wrap', str(run_dir),
            '--load-test-log', str(run_dir / 'load_test.log'),
-           '--thresholds', 'delivered_min_pct=0',            # delivery is judged below, over the whole run
+           '--thresholds', 'delivered_min_pct=0,foreign_cores=64',   # delivery judged below over the whole run;
+                                                                     # node containers run as root, not "other users"
            '--',
            'sh', '-c', f'"{BIN}" "{run_dir / "config.toml"}" > "{run_dir / "load_test.log"}" 2>&1']
     proc = subprocess.Popen(cmd, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

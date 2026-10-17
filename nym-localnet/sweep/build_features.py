@@ -65,9 +65,7 @@ def wire_events(run_dir, gw, tags):
     ev = {conn: {'to_gw': list(zip(g['t_ns'].to_numpy(np.int64) / 1e9, g['len']))}
           for conn, g in fr[fr['direction'] == 'to_gw'].groupby('conn')}
     conn_of, frac = match_connections(ev, wire, MATCH_TOL_S)
-    missing = sorted(set(wire) - set(conn_of.values()))
-    if missing:
-        raise ValueError(f'wire connections not matched for clients {missing}')
+    # a client without a matched connection (e.g. one that sent nothing) simply has no wire events
     fr = fr[fr['conn'].isin(conn_of)]
     return pd.DataFrame({'wall_ns': fr['t_ns'].to_numpy(np.int64), 'direction': fr['direction'].to_numpy(),
                          'size': fr['len'].to_numpy(), 'client_idx': fr['conn'].map(conn_of).to_numpy()})
@@ -101,10 +99,15 @@ def load_streams(run_dir, view, clients):
             'pay': np.sort(t[mine & (direction == 'from_gw') & (size == sz['pay'])]),
             'ack': np.sort(t[mine & (direction == 'from_gw') & (size == sz['ack'])]),
         }
-    empty = [c for c, s in streams.items() if min(len(s['sent']), len(s['pay']), len(s['ack'])) < 200]
-    if empty:
-        raise ValueError(f'clients {empty} have (almost) no {view} traffic in the window: wrong sizes?')
-    return streams, win is not None
+    # a client with (almost) nothing in a stream cannot be aligned: silent clients (continuous
+    # sending and cover both off, no file in the window) are dropped with their pairs; if EVERY
+    # client is silent the sizes are wrong for this view
+    silent = sorted(c for c, s in streams.items() if min(len(s['sent']), len(s['pay']), len(s['ack'])) < 200)
+    if len(silent) == len(streams):
+        raise ValueError(f'no {view} traffic in the window for any client: wrong sizes?')
+    for c in silent:
+        del streams[c]
+    return streams, win is not None, silent
 
 
 PROFILE_KEYS = {'mu': 'average_packet_delay_ms', 'send': 'message_sending_average_delay_ms',
@@ -138,7 +141,10 @@ def process_run(run_dir, view, plan_row, cache):
     run_dir = Path(run_dir)
     clients, sessions = load_run_labels(run_dir)
     profiles = client_profiles(run_dir)
-    streams, cropped = load_streams(run_dir, view, clients)
+    streams, cropped, silent = load_streams(run_dir, view, clients)
+    sessions = [(a, b) for a, b in sessions if a in streams and b in streams]   # pairs with a silent end are dropped
+    if not sessions:
+        raise ValueError(f'no pair left after dropping silent clients {silent}')
     inits = [{'idx': a, **streams[a], 'sess': k} for k, (a, b) in enumerate(sessions)]
     resps = [{'idx': b, **streams[b], 'sess': k} for k, (a, b) in enumerate(sessions)]
     rows = []
@@ -153,6 +159,7 @@ def process_run(run_dir, view, plan_row, cache):
         df.insert(1, k if k != 'dataset' else 'experiment', plan_row[k])
     df.insert(1, 'view', view)
     df.insert(2, 'cropped', cropped)
+    df.insert(3, 'silent_clients', len(silent))
     cache.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(cache, index=False)
     return run_dir.name, view, len(sessions), len(df)
