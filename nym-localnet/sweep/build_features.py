@@ -10,7 +10,9 @@ each client's three streams (sent, received payload, received acks) are cropped 
 sending window [warmup_end, send_end] (run.json timeline + wall_offset_ns) and every initiator is
 paired with every responder of the run, exactly as before: one row per candidate pair x window
 (L = 100, 500, 0 = whole flow) with the b1-b4 and b7 features of linkobs/tools/pair_features.py
-(b6, the per-client profile features, stays empty). The run's plan settings are added as columns.
+(b6, the per-client profile features, stays empty). The run's plan settings are added as columns, and
+both partners' own settings (mu_I, send_I, loop_I, poisson_I, cover_I, session_I and the same _R, from
+run.json's groups), so results can be broken down by profile or by the difference between partners.
 
 Runs are cached (OUT/cache/<view>/<run>.csv.gz), so re-running after more runs were collected only
 processes the new ones. The tables are OUT/pairs_<view>.csv. With --splits, OUT/splits.csv assigns
@@ -105,10 +107,37 @@ def load_streams(run_dir, view, clients):
     return streams, win is not None
 
 
+PROFILE_KEYS = {'mu': 'average_packet_delay_ms', 'send': 'message_sending_average_delay_ms',
+                'loop': 'loop_cover_traffic_average_delay_ms', 'poisson': 'poisson_sending',
+                'cover': 'loop_cover_traffic', 'session': 'session'}
+
+
+def client_profiles(run_dir):
+    """client index -> {mu, send, loop, poisson, cover, session} from the run's group configs."""
+    cfg = json.loads((run_dir / 'run.json').read_text())['config']
+    base = cfg.get('client', {})
+    groups = {g['name']: g for g in cfg.get('groups', [])}
+    out = {}
+    with (run_dir / 'clients.csv').open() as fh:
+        for r in csv.DictReader(fh):
+            g = groups.get(r['group'], {})
+            prof = {}
+            for short, key in PROFILE_KEYS.items():
+                v = g.get(key) if g.get(key) is not None else base.get(key)
+                if short in ('poisson', 'cover'):
+                    v = int(v) if v is not None else 1            # the client default is on
+                elif short == 'session':
+                    v = v or 'connection'
+                prof[short] = v
+            out[int(r['client'])] = prof
+    return out
+
+
 def process_run(run_dir, view, plan_row, cache):
     os.nice(15)
     run_dir = Path(run_dir)
     clients, sessions = load_run_labels(run_dir)
+    profiles = client_profiles(run_dir)
     streams, cropped = load_streams(run_dir, view, clients)
     inits = [{'idx': a, **streams[a], 'sess': k} for k, (a, b) in enumerate(sessions)]
     resps = [{'idx': b, **streams[b], 'sess': k} for k, (a, b) in enumerate(sessions)]
@@ -117,6 +146,9 @@ def process_run(run_dir, view, plan_row, cache):
         for R in resps:
             rows += pf.pair_rows(run_dir.name, I, R, int(I['sess'] == R['sess']), {}, {})
     df = pd.DataFrame(rows)
+    for side in ('I', 'R'):
+        for short in PROFILE_KEYS:
+            df[f'{short}_{side}'] = df[side].map(lambda c: profiles.get(c, {}).get(short))
     for k in PLAN_COLS[::-1]:
         df.insert(1, k if k != 'dataset' else 'experiment', plan_row[k])
     df.insert(1, 'view', view)

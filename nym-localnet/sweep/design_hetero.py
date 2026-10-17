@@ -44,7 +44,7 @@ def main():
     ap.add_argument('--max-pairs', type=int, default=20)
     ap.add_argument('--duration', type=int, default=90)
     ap.add_argument('--warmup', type=int, default=10)
-    ap.add_argument('--drain', type=int, default=60)
+    ap.add_argument('--drain', type=int, default=180, help='max wait for files still in flight, s (a slow sender needs ~30 s per queued 1 MB file)')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     rng = random.Random(a.seed)

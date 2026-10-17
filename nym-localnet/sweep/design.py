@@ -69,7 +69,7 @@ def main():
     ap.add_argument('--runs-b', type=int, default=200)
     ap.add_argument('--duration', type=int, default=90, help='sending time per run, s')
     ap.add_argument('--warmup', type=int, default=10)
-    ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight, s')
+    ap.add_argument('--drain', type=int, default=180, help='max wait for files still in flight, s (a slow sender needs ~30 s per queued 1 MB file)')
     ap.add_argument('--message-size', type=int, default=1_000_000, help='bytes per real message (file)')
     ap.add_argument('--session', choices=['message', 'connection'], default='message',
                     help='path-selection session scope: one per message (the paper\'s model) or per connection')
