@@ -284,7 +284,14 @@ impl GatewayClient {
         }
     }
 
+    /// Identity tag of this client for the experiments' client-side wire log (same tag the gateway
+    /// uses for this client in its own wire log).
+    fn wire_tag(&self) -> u64 {
+        nym_sphinx::chunking::instrumentation::identity_tag(&self.local_identity.public_key().to_bytes())
+    }
+
     async fn read_control_response(&mut self) -> Result<ServerResponse, GatewayClientError> {
+        let wire_tag = self.wire_tag();
         // we use the fact that all request responses are Message::Text and only pushed
         // sphinx packets are Message::Binary
 
@@ -311,6 +318,7 @@ impl GatewayClient {
                         Err(err) => break Err(err),
                         Ok(msg) => msg
                     };
+                    crate::socket_state::wire_log_message(false, wire_tag, &ws_msg);
                     match ws_msg {
                         Message::Binary(bin_msg) => {
                             // if we have established the shared key already, attempt to use it for decryption
@@ -341,10 +349,12 @@ impl GatewayClient {
         &mut self,
         msg: impl Into<Message>,
     ) -> Result<(), GatewayClientError> {
+        let msg = msg.into();
+        crate::socket_state::wire_log_message(true, self.wire_tag(), &msg);
         match self.connection {
-            SocketState::Available(ref mut conn) => Ok(conn.send(msg.into()).await?),
+            SocketState::Available(ref mut conn) => Ok(conn.send(msg).await?),
             SocketState::PartiallyDelegated(ref mut partially_delegated) => {
-                if let Err(err) = partially_delegated.send_without_response(msg.into()).await {
+                if let Err(err) = partially_delegated.send_without_response(msg).await {
                     error!("failed to send message without response - {err}...");
                     // we must ensure we do not leave the task still active
                     if let Err(err) = self.recover_socket_connection().await {
@@ -366,6 +376,7 @@ impl GatewayClient {
         &mut self,
         msg: impl Into<Message>,
     ) -> Result<ServerResponse, GatewayClientError> {
+        let wire_tag = self.wire_tag();
         let should_restart_mixnet_listener = if self.connection.is_partially_delegated() {
             self.recover_socket_connection().await?;
             true
@@ -378,7 +389,9 @@ impl GatewayClient {
             SocketState::NotConnected => return Err(GatewayClientError::ConnectionNotEstablished),
             _ => return Err(GatewayClientError::ConnectionInInvalidState),
         };
-        conn.send(msg.into()).await?;
+        let msg = msg.into();
+        crate::socket_state::wire_log_message(true, wire_tag, &msg);
+        conn.send(msg).await?;
 
         let timeout = sleep(self.cfg.connection.response_timeout_duration);
         tokio::pin!(timeout);
@@ -413,6 +426,7 @@ impl GatewayClient {
         &mut self,
         msg: impl Into<Message>,
     ) -> Result<ServerResponse, GatewayClientError> {
+        let wire_tag = self.wire_tag();
         let should_restart_mixnet_listener = if self.connection.is_partially_delegated() {
             self.recover_socket_connection().await?;
             true
@@ -425,7 +439,9 @@ impl GatewayClient {
             SocketState::NotConnected => return Err(GatewayClientError::ConnectionNotEstablished),
             _ => return Err(GatewayClientError::ConnectionInInvalidState),
         };
-        conn.send(msg.into()).await?;
+        let msg = msg.into();
+        crate::socket_state::wire_log_message(true, wire_tag, &msg);
+        conn.send(msg).await?;
         let response = self.read_control_response().await;
 
         if should_restart_mixnet_listener {
@@ -438,6 +454,12 @@ impl GatewayClient {
         &mut self,
         messages: Vec<Message>,
     ) -> Result<(), GatewayClientError> {
+        if nym_sphinx::chunking::instrumentation::wire_enabled() {
+            let wire_tag = self.wire_tag();
+            for msg in &messages {
+                crate::socket_state::wire_log_message(true, wire_tag, msg);
+            }
+        }
         match self.connection {
             SocketState::Available(ref mut conn) => {
                 let stream_messages: Vec<_> = messages.into_iter().map(Ok).collect();
@@ -997,6 +1019,7 @@ impl GatewayClient {
             return Err(GatewayClientError::ConnectionInInvalidState);
         }
 
+        let wire_tag = self.wire_tag();
         #[allow(clippy::expect_used)]
         let partially_delegated =
             match std::mem::replace(&mut self.connection, SocketState::Invalid) {
@@ -1011,6 +1034,7 @@ impl GatewayClient {
                         ),
                         self.bandwidth.clone(),
                         self.shutdown_token.clone(),
+                        wire_tag,
                     )
                 }
                 other => {

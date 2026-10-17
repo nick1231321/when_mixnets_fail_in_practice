@@ -4398,8 +4398,13 @@ version = "0.1.0"
 dependencies = [
  "nym-bin-common",
  "nym-sdk",
+ "nym-sphinx-chunking",
+ "nym-task",
  "nym-topology",
+ "serde",
+ "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

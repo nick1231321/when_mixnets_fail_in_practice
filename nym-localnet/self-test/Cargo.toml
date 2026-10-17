@@ -2,6 +2,7 @@
 name = "nym-localnet-self-test"
 version = "0.1.0"
 edition = "2021"
+default-run = "nym-self-test"
 
 [[bin]]
 name = "nym-self-test"
@@ -11,7 +12,12 @@ path = "src/main.rs"
 nym-sdk = { path = "../../sdk/rust/nym-sdk" }
 nym-topology = { path = "../../common/topology" }
 nym-bin-common = { path = "../../common/bin-common", features = ["basic_tracing"] }
-tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "time"] }
+nym-sphinx-chunking = { path = "../../common/nymsphinx/chunking" }
+nym-task = { path = "../../common/task" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "time", "sync"] }
+toml = "0.8"
 
 [workspace]
 

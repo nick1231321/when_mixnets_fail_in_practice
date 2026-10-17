@@ -21,6 +21,8 @@
 //! info level (shown by default) and every chosen route at debug level, e.g.
 //!   RUST_LOG=warn,nym_topology::path_selection=debug nym-self-test --strategy khf:1,2
 
+pub mod load_test;
+
 use nym_sdk::mixnet::{self, MixnetMessageSender, PathSelectionStrategy, Routing, RoutingConfig};
 use nym_topology::provider_trait::{async_trait, TopologyProvider};
 use nym_topology::NymTopology;
