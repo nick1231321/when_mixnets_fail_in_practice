@@ -23,11 +23,22 @@ from pathlib import Path
 import base58
 
 HOST = "127.0.0.1"
-# must match node.sh / docker-compose.yml
+# must match node.sh / docker-compose.yml. The netem localnet (netem/gen_compose.py) overrides
+# these through the environment: every node then has its own IP SUBNET.(10+i) announced as
+# mix_host (node-to-node), while clients on the host still reach the gateways through
+# CLIENT_HOST and the published websocket port WS_PORT_BASE+g.
+SUBNET = os.environ.get("LOCALNET_SUBNET")  # e.g. "172.30.0."; unset = everything on HOST
+CLIENT_HOST = os.environ.get("LOCALNET_CLIENT_HOST", HOST)
+WS_PORT_BASE = int(os.environ.get("LOCALNET_WS_PORT_BASE", "9000"))
 LAYERS = 3
-MIXES_PER_LAYER = 3
-NUM_GATEWAYS = 2
+MIXES_PER_LAYER = int(os.environ.get("LOCALNET_MIXES_PER_LAYER", "3"))
+NUM_GATEWAYS = int(os.environ.get("LOCALNET_GATEWAYS", "2"))
 FIRST_GATEWAY = LAYERS * MIXES_PER_LAYER + 1
+
+
+def node_host(node_id):
+    """IP a node is reached at by other nodes."""
+    return f"{SUBNET}{10 + node_id}" if SUBNET else HOST
 NODES_ROOT = Path("/root/.nym/nym-nodes")
 WATCH_INTERVAL_SECS = 60
 
@@ -59,7 +70,7 @@ def entry(base_dir, name, node_id, gateway, rotation_ids):
     rotation_ids[name] = rotation_id
     node = {
         "node_id": node_id,
-        "mix_host": f"{HOST}:{10000 + node_id}",
+        "mix_host": f"{node_host(node_id)}:{10000 + node_id}",
         "entry": None,
         "identity_key": bonding["identity_key"],
         "sphinx_key": sphinx_key,
@@ -68,8 +79,8 @@ def entry(base_dir, name, node_id, gateway, rotation_ids):
     }
     if gateway:
         node["entry"] = {
-            "ip_addresses": [HOST],
-            "clients_ws_port": 9000 + (node_id - FIRST_GATEWAY),
+            "ip_addresses": [CLIENT_HOST],
+            "clients_ws_port": WS_PORT_BASE + (node_id - FIRST_GATEWAY),
             "hostname": None,
             "clients_wss_port": None,
         }

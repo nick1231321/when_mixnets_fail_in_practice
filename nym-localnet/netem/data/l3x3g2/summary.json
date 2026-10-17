@@ -1,0 +1,46 @@
+{
+  "built_at": "2026-10-13T18:32:05+00:00",
+  "epoch": 34211,
+  "epoch_file": "20261011T043016Z.json.gz",
+  "verloc_snapshots": [
+    "20261008T150159Z.json.gz",
+    "20261009T023757Z.json.gz",
+    "20261009T143809Z.json.gz",
+    "20261010T023758Z.json.gz",
+    "20261010T143757Z.json.gz",
+    "20261011T023759Z.json.gz",
+    "20261011T143758Z.json.gz",
+    "20261012T023758Z.json.gz",
+    "20261012T143858Z.json.gz",
+    "20261013T023758Z.json.gz",
+    "20261013T143905Z.json.gz"
+  ],
+  "mixes_per_layer": 3,
+  "gateways": 2,
+  "seed": 1,
+  "netem_stat": "mean",
+  "pairs": 55,
+  "sources": {
+    "measured-both": 36,
+    "measured-one": 18,
+    "standin": 1
+  },
+  "standin_profile_error_ms": {
+    "median": 0.07,
+    "max": 0.07
+  },
+  "validation": null,
+  "mapping": {
+    "mix1": 1764,
+    "mix2": 217,
+    "mix3": 2466,
+    "mix4": 1822,
+    "mix5": 193,
+    "mix6": 3020,
+    "mix7": 406,
+    "mix8": 2361,
+    "mix9": 1360,
+    "gw1": 3344,
+    "gw2": 2409
+  }
+}

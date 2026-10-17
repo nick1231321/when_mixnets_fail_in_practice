@@ -1,3 +1,6 @@
 data/
 self-test/target/
 verify-logs/
+load-test-results/
+data-netem/
+data-netem.*/
