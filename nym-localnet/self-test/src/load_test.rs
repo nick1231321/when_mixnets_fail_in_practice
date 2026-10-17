@@ -131,6 +131,10 @@ struct GroupConfig {
     message_sending_average_delay_ms: Option<u64>,
     /// Loop cover stream rate (average gap between cover packets).
     loop_cover_traffic_average_delay_ms: Option<u64>,
+    /// Loop cover stream on/off for this group (NymVPN's "background cover traffic" toggle).
+    loop_cover_traffic: Option<bool>,
+    /// Poisson sending with cover in empty slots on/off (NymVPN's "send traffic continuously").
+    poisson_sending: Option<bool>,
 }
 
 fn default_topology() -> PathBuf {
@@ -516,6 +520,12 @@ async fn load_test(config: Config) -> Result<(), String> {
             if let Some(ms) = gc.loop_cover_traffic_average_delay_ms {
                 d.cover_traffic.loop_cover_traffic_average_delay = Duration::from_millis(ms);
             }
+            if let Some(on) = gc.loop_cover_traffic {
+                d.cover_traffic.disable_loop_cover_traffic_stream = !on;
+            }
+            if let Some(on) = gc.poisson_sending {
+                d.traffic.disable_main_poisson_packet_distribution = !on;
+            }
             d
         })
         .collect();
@@ -882,6 +892,7 @@ fn write_run(
                 "average_packet_delay_ms": g.average_packet_delay_ms,
                 "message_sending_average_delay_ms": g.message_sending_average_delay_ms,
                 "loop_cover_traffic_average_delay_ms": g.loop_cover_traffic_average_delay_ms,
+                "loop_cover_traffic": g.loop_cover_traffic, "poisson_sending": g.poisson_sending,
                 "real_routing": g.real_routing, "real_ack_routing": g.real_ack_routing,
                 "cover_routing": g.cover_routing, "cover_ack_routing": g.cover_ack_routing,
             })).collect::<Vec<_>>(),

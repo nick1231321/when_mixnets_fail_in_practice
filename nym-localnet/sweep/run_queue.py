@@ -34,7 +34,7 @@ SAMPLE_MIXES = [f'{PROJECT}-mix1', f'{PROJECT}-mix30', f'{PROJECT}-mix60']
 MANIFEST_COLS = ['run_id', 'dataset', 'condition', 'strategy', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min',
                  'load_factor', 'message_size', 'clients', 'pkt_per_s', 'duration_s', 'warmup_s', 'drain_s', 'replicate', 'seed',
                  'started', 'finished', 'exit', 'delivered_min_pct', 'latency_p95_ms', 'verdict', 'reasons',
-                 'status', 'netem_reapplied', 'gateway_wire_mb', 'client_wire_mb', 'pcap_mb']
+                 'status', 'netem_reapplied', 'gateway_wire_mb', 'client_wire_mb', 'pcap_mb', 'clients_spec']
 
 
 def log(msg):
@@ -119,22 +119,12 @@ def rotate_gateways():
 
 
 # ----------------------------------------------------------------------------- one run
-def config_toml(row, run_dir):
-    return f'''# rate sweep {row["run_id"]}: dataset {row["dataset"]}, {row["condition"]}, {row["strategy"]}
-topology = "{TOPOLOGY}"
-output_dir = "{run_dir}"
-duration_s = {row["duration_s"]}
-warmup_s = {row["warmup_s"]}
-drain_s = {row["drain_s"]}
-message_size = {row["message_size"]}
-messages_per_client_per_min = {float(row["msg_per_min"])}
-pairing = "random-pairs"
-seed = {row["seed"]}
-[client]
-loop_cover_traffic = true
-poisson_sending = true
-ack_wait_addition_s = 10
-[[group]]
+def groups_toml(row):
+    """One group for a homogeneous run; one group per client (its own mu and sending interval) for a
+    heterogeneous run (plan column clients_spec, initiators first, paired by split-pairs)."""
+    spec = json.loads(row['clients_spec']) if row.get('clients_spec') else None
+    if spec is None:
+        return 'random-pairs', f'''[[group]]
 name = "g"
 count = {row["clients"]}
 strategy = "{row["strategy"]}"
@@ -142,6 +132,39 @@ average_packet_delay_ms = {row["mu_ms"]}
 message_sending_average_delay_ms = {row["send_ms"]}
 loop_cover_traffic_average_delay_ms = {row["loop_ms"]}
 '''
+    def one(k, c):
+        mu, send = c[0], c[1]
+        loop = c[2] if len(c) > 2 else row['loop_ms']
+        toggles = '' if len(c) <= 3 else (f'poisson_sending = {"true" if c[3] else "false"}\n'
+                                          f'loop_cover_traffic = {"true" if c[4] else "false"}\n')
+        return f'''[[group]]
+name = "c{k:02d}"
+count = 1
+strategy = "{row["strategy"]}"
+average_packet_delay_ms = {mu}
+message_sending_average_delay_ms = {send}
+loop_cover_traffic_average_delay_ms = {loop}
+{toggles}'''
+    return 'split-pairs', ''.join(one(k, c) for k, c in enumerate(spec))
+
+
+def config_toml(row, run_dir):
+    pairing, groups = groups_toml(row)
+    return f'''# run {row["run_id"]}: dataset {row["dataset"]}, {row["condition"]}, {row["strategy"]}
+topology = "{TOPOLOGY}"
+output_dir = "{run_dir}"
+duration_s = {row["duration_s"]}
+warmup_s = {row["warmup_s"]}
+drain_s = {row["drain_s"]}
+message_size = {row["message_size"]}
+messages_per_client_per_min = {float(row["msg_per_min"])}
+pairing = "{pairing}"
+seed = {row["seed"]}
+[client]
+loop_cover_traffic = true
+poisson_sending = true
+ack_wait_addition_s = 10
+{groups}'''
 
 
 def slice_gateway_logs(before, run_dir):
@@ -170,15 +193,37 @@ def slice_gateway_logs(before, run_dir):
 
 
 def parse_load_test(log_path):
-    delivered, p95 = [], []
+    """Delivery over all files of the run (the load test reports it per group, and a heterogeneous run
+    has one group per client) and the largest per-group p95 latency."""
+    sent = delivered = 0; p95 = []
     for line in log_path.read_text(errors='replace').splitlines():
         m = re.match(r'\s*(\S+)\s+(\d+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$', line)
         if m:
-            delivered.append(float(m.group(3))); p95.append(float(m.group(5)))
-    return (min(delivered) if delivered else None), (max(p95) if p95 else None)
+            n = int(m.group(2)); sent += n; delivered += n * float(m.group(3)) / 100; p95.append(float(m.group(5)))
+    return (round(100 * delivered / sent, 2) if sent else None), (max(p95) if p95 else None)
 
 
-def run_one(row, out, capture, timeout_s):
+def extract_wire(cap_dir):
+    """The wire view of each gateway's pcap, as an observer can use it from encrypted traffic:
+    <gw>.frames.csv.gz (one row per WebSocket frame: connection, direction, time, length) and
+    <gw>.segments.csv.gz (one row per TCP segment with payload). Returns False if a conversion failed."""
+    ok = True
+    for pcap in sorted(cap_dir.glob('*.pcap')):
+        gw = pcap.stem
+        for flag, name in (([], 'frames'), (['--tls'], 'segments')):
+            csv_path = cap_dir / f'{gw}.{name}.csv'
+            r = sh([sys.executable, str(LOCAL / 'linkobs/pcap_streams.py'), str(pcap), *flag, '--gateway-ports',
+                    '9000,9001', '--conn-prefix', f'{gw}/', '--out', str(csv_path)])
+            if r.returncode != 0 or not csv_path.exists():
+                log(f'   wire extraction failed for {pcap.name} ({name}): {r.stderr.strip()[-200:]}'); ok = False
+                continue
+            with open(csv_path, 'rb') as f, gzip.open(f'{csv_path}.gz', 'wb', compresslevel=6) as g:
+                shutil.copyfileobj(f, g)
+            csv_path.unlink()
+    return ok
+
+
+def run_one(row, out, capture, timeout_s, extract=False, keep_pcap=True):
     run_dir = out / 'runs' / row['run_id']
     if run_dir.exists():
         shutil.rmtree(run_dir)           # an unfinished earlier attempt
@@ -190,7 +235,9 @@ def run_one(row, out, capture, timeout_s):
         sh([str(LOCAL / 'linkobs/capture.sh'), 'start', str(run_dir / 'capture')])
     env = {k: v for k, v in os.environ.items() if k != 'MIXCORR_WIRE_DIR'}   # the clients log nothing
     cmd = [sys.executable, str(LOCAL / 'resmon/resmon.py'), 'wrap', str(run_dir),
-           '--load-test-log', str(run_dir / 'load_test.log'), '--',
+           '--load-test-log', str(run_dir / 'load_test.log'),
+           '--thresholds', 'delivered_min_pct=0',            # delivery is judged below, over the whole run
+           '--',
            'sh', '-c', f'"{BIN}" "{run_dir / "config.toml"}" > "{run_dir / "load_test.log"}" 2>&1']
     proc = subprocess.Popen(cmd, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -207,6 +254,9 @@ def run_one(row, out, capture, timeout_s):
     time.sleep(2)                        # let the gateways flush their last lines
     gw_mb = slice_gateway_logs(before, run_dir)
     pcap_mb = sum(p.stat().st_size for p in (run_dir / 'capture').glob('*.pcap')) / 1e6 if capture else 0
+    if capture and extract and extract_wire(run_dir / 'capture') and not keep_pcap:
+        for p in (run_dir / 'capture').glob('*.pcap'):
+            p.unlink()                   # the wire view is extracted; the raw pcap is kept every N-th run only
     delivered, p95 = parse_load_test(run_dir / 'load_test.log')
     try:
         v = json.loads((run_dir / 'verdict.json').read_text())
@@ -229,10 +279,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--plan', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--dataset', default='A,B,C', help='which datasets of the plan to run')
+    ap.add_argument('--dataset', default='', help='comma-separated datasets of the plan to run (default: all)')
     ap.add_argument('--max-runs', type=int, help='stop after this many runs (e.g. a pilot)')
     ap.add_argument('--only', help='comma-separated run ids to run (e.g. a pilot selection)')
     ap.add_argument('--capture-every', type=int, default=0, help='tcpdump every N-th run (0 = never)')
+    ap.add_argument('--extract-wire', action='store_true',
+                    help='after each captured run, extract the wire view (frames + TCP segments) from the pcaps')
+    ap.add_argument('--keep-pcap-every', type=int, default=1,
+                    help='with --extract-wire: keep the raw pcap only every N-th run (1 = always)')
     ap.add_argument('--full-check', type=int, default=25, help='check netem on all nodes every N runs')
     ap.add_argument('--rotate-gb', type=float, default=4.0, help='rotate the gateway wire logs above this size')
     ap.add_argument('--min-free-gb', type=float, default=25.0)
@@ -249,7 +303,7 @@ def main():
         if not arp_ok():
             raise SystemExit('ARP table limit too low: run netem/vm_sysctl.sh first')
         shutil.copy(a.plan, out / 'plan.csv')
-        plan = [r for r in csv.DictReader(open(a.plan)) if r['dataset'] in a.dataset.split(',')]
+        plan = [r for r in csv.DictReader(open(a.plan)) if not a.dataset or r['dataset'] in a.dataset.split(',')]
         if a.only:
             plan = [r for r in plan if r['run_id'] in a.only.split(',')]
         manifest = out / 'manifest.csv'
@@ -289,16 +343,18 @@ def main():
             timeout = int(row['duration_s']) + int(row['warmup_s']) + int(row['drain_s']) + 600
             log(f'{row["run_id"]} {row["dataset"]} {row["condition"]:22s} {row["strategy"]:10s} '
                 f'{row["clients"]} clients, {row["pkt_per_s"]} pkt/s{" +pcap" if capture else ""}')
-            res = run_one(row, out, capture, timeout)
+            keep = int(row['run_id'][1:]) % a.keep_pcap_every == 0
+            res = run_one(row, out, capture, timeout, a.extract_wire, keep)
             if not res['delivered_min_pct']:                         # nothing arrived at all: broken network
                 log(f'   -> {res["status"]}, nothing delivered: healing and repeating {row["run_id"]} once')
                 if not heal('a run delivered nothing'):
                     (out / 'PAUSE').touch(); log('PAUSE set: the localnet does not deliver, needs a look'); continue
                 topology_mtime = TOPOLOGY.stat().st_mtime
-                res = run_one(row, out, capture, timeout)
+                res = run_one(row, out, capture, timeout, a.extract_wire, keep)
             res['netem_reapplied'] = reapplied
             with open(manifest, 'a', newline='') as fh:
-                w = csv.DictWriter(fh, fieldnames=MANIFEST_COLS, extrasaction='ignore')
+                cols = MANIFEST_COLS if new_manifest else next(csv.reader(open(manifest)))
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction='ignore')
                 if new_manifest:
                     w.writeheader(); new_manifest = False
                 w.writerow({**row, **res})

@@ -236,3 +236,5 @@ its packets and retransmissions, so the run reports `NOT delivered` while its ro
 This is the availability cost of fixing nodes. Start the node again
 (`docker compose start mix3`) if every run should deliver, or use `--require-delivery` to count
 these runs as failures.
+
+Collecting the flow-matching datasets (localnet and live network): see [COLLECTION.md](COLLECTION.md).

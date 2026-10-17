@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Turn the raw logs of the rate sweep (run_queue.py) into the pair-feature tables of the tree.
 
-For every finished, clean run and the gateway view (the gateways' wire log: sent 2413 B, delivered
-payload 1643 B, ack 21 B) each client's three streams (sent, received payload, received acks) are cropped to the run's
+For every finished, clean run and each view (--views):
+  gateway  the gateways' wire log                (sent 2413 B, delivered payload 1643 B, ack 21 B)
+  wire     tcpdump of the client<->gateway links (WebSocket frames: sent 2452 B, payload 1673 B, ack 51 B;
+           capture/<gw>.frames.csv.gz from run_queue.py --extract-wire). A wire connection is anonymous;
+           it is matched to its client by its send times against the gateway log, for the labels only.
+each client's three streams (sent, received payload, received acks) are cropped to the run's
 sending window [warmup_end, send_end] (run.json timeline + wall_offset_ns) and every initiator is
 paired with every responder of the run, exactly as before: one row per candidate pair x window
 (L = 100, 500, 0 = whole flow) with the b1-b4 and b7 features of linkobs/tools/pair_features.py
@@ -15,7 +19,7 @@ dataset B all test), for run_model.py --splits. With --split-by condition (defau
 exist) the 70 / 15 / 15 is taken within each condition instead, over all strategies.
 
   build_features.py --sweep ~/flow-matching-data/2026-10-17-rate-sweep/main --out OUT
-                    [--views gateway] [--workers 2] [--splits] [--include-degraded]
+                    [--views gateway,wire] [--workers 2] [--splits] [--include-degraded]
 
 It runs at low priority (nice 15), but each worker still takes a core: while the collection is
 running keep --workers small, or the collection's runs may be flagged as degraded.
@@ -29,9 +33,12 @@ import pandas as pd
 LOCAL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LOCAL / 'linkobs/tools'))
 import pair_features as pf                      # noqa: E402
+sys.path.insert(0, str(LOCAL / 'linkobs'))
+from link_export import match_connections       # noqa: E402
 from profile_features import load_run_labels    # noqa: E402
 
-SIZES = {'gateway': dict(sent=2413, pay=1643, ack=21)}
+SIZES = {'gateway': dict(sent=2413, pay=1643, ack=21), 'wire': dict(sent=2452, pay=1673, ack=51)}
+MATCH_TOL_S = 0.005                  # a wire frame and its gateway log entry are < 1 ms apart in practice
 PLAN_COLS = ['dataset', 'condition', 'strategy', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min', 'message_size',
              'clients']
 
@@ -45,22 +52,44 @@ def sending_window(run_dir):
     return (t['warmup_end'] + off) / 1e9, (t['send_end'] + off) / 1e9
 
 
+def wire_events(run_dir, gw, tags):
+    """The run's tcpdump frames (all gateways) with each connection replaced by its client index."""
+    parts = sorted((run_dir / 'capture').glob('*.frames.csv.gz'))
+    if not parts:
+        raise ValueError('no extracted wire frames (capture/*.frames.csv.gz)')
+    fr = pd.concat(pd.read_csv(p) for p in parts)
+    sends = gw[(gw['direction'] == 'to_gw')]
+    wire = {tags[k]: np.sort(g['wall_ns'].to_numpy(np.int64) / 1e9) for k, g in sends.groupby('client')}
+    ev = {conn: {'to_gw': list(zip(g['t_ns'].to_numpy(np.int64) / 1e9, g['len']))}
+          for conn, g in fr[fr['direction'] == 'to_gw'].groupby('conn')}
+    conn_of, frac = match_connections(ev, wire, MATCH_TOL_S)
+    missing = sorted(set(wire) - set(conn_of.values()))
+    if missing:
+        raise ValueError(f'wire connections not matched for clients {missing}')
+    fr = fr[fr['conn'].isin(conn_of)]
+    return pd.DataFrame({'wall_ns': fr['t_ns'].to_numpy(np.int64), 'direction': fr['direction'].to_numpy(),
+                         'size': fr['len'].to_numpy(), 'client_idx': fr['conn'].map(conn_of).to_numpy()})
+
+
 def load_streams(run_dir, view, clients):
     """{client index: {'sent', 'pay', 'ack'}} sorted wall-clock seconds, cropped to the sending window."""
     tags = {}
     with (run_dir / 'clients.csv').open() as fh:
         for r in csv.DictReader(fh):
             tags[r['wire_tag']] = int(r['client'])
-    frames = [pd.read_csv(f, dtype={'client': str}) for f in sorted((run_dir / f'{view}_wire').glob('wire-*.csv*'))]
-    if not frames:
-        raise ValueError(f'no {view} wire log')
-    w = pd.concat(frames)
+    gw = [pd.read_csv(f, dtype={'client': str}) for f in sorted((run_dir / 'gateway_wire').glob('wire-*.csv*'))]
+    if not gw:
+        raise ValueError('no gateway wire log')
+    w = pd.concat(gw)
     w = w[w['client'].isin(tags)]
+    if view == 'wire':
+        w = wire_events(run_dir, w, tags)
     win = sending_window(run_dir)
     t = w['wall_ns'].to_numpy(np.int64) / 1e9
     keep = np.ones(len(w), bool) if win is None else (t >= win[0]) & (t <= win[1])
     w, t = w[keep], t[keep]
-    size, direction, client = w['size'].to_numpy(), w['direction'].to_numpy(), w['client'].map(tags).to_numpy()
+    size, direction = w['size'].to_numpy(), w['direction'].to_numpy()
+    client = w['client'].map(tags).to_numpy() if view == 'gateway' else w['client_idx'].to_numpy()
     sz = SIZES[view]
     streams = {}
     for c in clients:
@@ -120,7 +149,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--sweep', required=True, help='the runner\'s output dir (with manifest.csv and runs/)')
     ap.add_argument('--out', required=True)
-    ap.add_argument('--views', default='gateway', choices=sorted(SIZES))
+    ap.add_argument('--views', default='gateway', help='comma-separated: gateway, wire')
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--include-degraded', action='store_true')
     ap.add_argument('--runs', help='comma-separated run ids (default: all finished clean runs)')

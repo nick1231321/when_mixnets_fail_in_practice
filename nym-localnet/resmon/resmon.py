@@ -261,7 +261,7 @@ def main():
     v = sub.add_parser('verdict'); v.add_argument('csv'); v.add_argument('--load-test-log'); v.add_argument('--json')
     v.add_argument('--cores-assigned', type=int); v.add_argument('--thresholds', default='')
     wr = sub.add_parser('wrap'); wr.add_argument('outdir'); wr.add_argument('--procs', default='nym-node,nym-load-test')
-    wr.add_argument('--cores', default=''); wr.add_argument('--load-test-log')
+    wr.add_argument('--cores', default=''); wr.add_argument('--load-test-log'); wr.add_argument('--thresholds', default='')
     argv = sys.argv[1:]
     command = []
     if argv and argv[0] == 'wrap':
