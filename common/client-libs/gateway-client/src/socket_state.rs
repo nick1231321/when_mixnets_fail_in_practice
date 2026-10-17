@@ -56,22 +56,6 @@ pub(crate) fn ws_fd(_conn: &WsConn) -> Option<RawFd> {
     None
 }
 
-/// Client-side wire log (experiments only): records a websocket message crossing the client<->gateway
-/// link, in the same format as the gateway-side wire log, when `MIXCORR_WIRE_DIR` is set in the
-/// client's process. This is what an observer of the client's own network link sees: one event per
-/// websocket message, with its direction, time and size. A no-op otherwise.
-pub(crate) fn wire_log_message(to_gateway: bool, wire_tag: u64, msg: &Message) {
-    if !nym_sphinx::chunking::instrumentation::wire_enabled() {
-        return;
-    }
-    let size = match msg {
-        Message::Binary(b) => b.len(),
-        Message::Text(t) => t.len(),
-        _ => return,
-    };
-    nym_sphinx::chunking::instrumentation::wire_log(to_gateway, wire_tag, size);
-}
-
 #[derive(Debug)]
 pub(crate) struct PartiallyDelegatedHandle {
     sink_half: SplitSink<WsConn, Message>,
@@ -87,9 +71,6 @@ struct PartiallyDelegatedRouter {
 
     stream_return: SplitStreamSender,
     stream_return_requester: oneshot::Receiver<()>,
-
-    // experiments: identity tag of this client for the client-side wire log
-    wire_tag: u64,
 }
 
 impl PartiallyDelegatedRouter {
@@ -99,7 +80,6 @@ impl PartiallyDelegatedRouter {
         client_bandwidth: ClientBandwidth,
         stream_return: SplitStreamSender,
         stream_return_requester: oneshot::Receiver<()>,
-        wire_tag: u64,
     ) -> PartiallyDelegatedRouter {
         PartiallyDelegatedRouter {
             packet_router,
@@ -107,7 +87,6 @@ impl PartiallyDelegatedRouter {
             client_bandwidth,
             stream_return,
             stream_return_requester,
-            wire_tag,
         }
     }
 
@@ -288,7 +267,6 @@ impl PartiallyDelegatedRouter {
     ) -> Result<Vec<Vec<u8>>, GatewayClientError> {
         let mut plaintexts = Vec::new();
         for ws_msg in messages {
-            wire_log_message(false, self.wire_tag, &ws_msg);
             if let Some(plaintext) = self.recover_received_plaintext(ws_msg)? {
                 plaintexts.push(plaintext)
             }
@@ -314,7 +292,6 @@ impl PartiallyDelegatedHandle {
         shared_key: Arc<SharedSymmetricKey>,
         client_bandwidth: ClientBandwidth,
         shutdown: ShutdownToken,
-        wire_tag: u64,
     ) -> Self {
         // when called for, it NEEDS TO yield back the stream so that we could merge it and
         // read control request responses.
@@ -330,7 +307,6 @@ impl PartiallyDelegatedHandle {
             client_bandwidth,
             stream_sender,
             notify_receiver,
-            wire_tag,
         )
         .spawn(stream, shutdown);
 

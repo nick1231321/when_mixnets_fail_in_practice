@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Turn the raw logs of the rate sweep (run_queue.py) into the pair-feature tables of the tree.
 
-For every finished, clean run and every observation point (--views):
-  gateway  the gateways' wire log  (sent 2413 B, delivered payload 1643 B, ack 21 B)
-  client   the clients' own log    (sent 2452 B, delivered payload 1673 B, ack 51 B; the gateway's
-                                    70 B confirmations and the 28/40 B handshake are not used)
-each client's three streams (sent, received payload, received acks) are cropped to the run's
+For every finished, clean run and the gateway view (the gateways' wire log: sent 2413 B, delivered
+payload 1643 B, ack 21 B) each client's three streams (sent, received payload, received acks) are cropped to the run's
 sending window [warmup_end, send_end] (run.json timeline + wall_offset_ns) and every initiator is
 paired with every responder of the run, exactly as before: one row per candidate pair x window
 (L = 100, 500, 0 = whole flow) with the b1-b4 and b7 features of linkobs/tools/pair_features.py
@@ -14,10 +11,11 @@ paired with every responder of the run, exactly as before: one row per candidate
 Runs are cached (OUT/cache/<view>/<run>.csv.gz), so re-running after more runs were collected only
 processes the new ones. The tables are OUT/pairs_<view>.csv. With --splits, OUT/splits.csv assigns
 every run to train / val / test (70 / 15 / 15 within each condition x strategy cell of dataset A,
-dataset B all test), for run_model.py --splits.
+dataset B all test), for run_model.py --splits. With --split-by condition (default while few runs
+exist) the 70 / 15 / 15 is taken within each condition instead, over all strategies.
 
   build_features.py --sweep ~/flow-matching-data/2026-10-17-rate-sweep/main --out OUT
-                    [--views gateway,client] [--workers 2] [--splits] [--include-degraded]
+                    [--views gateway] [--workers 2] [--splits] [--include-degraded]
 
 It runs at low priority (nice 15), but each worker still takes a core: while the collection is
 running keep --workers small, or the collection's runs may be flagged as degraded.
@@ -33,7 +31,7 @@ sys.path.insert(0, str(LOCAL / 'linkobs/tools'))
 import pair_features as pf                      # noqa: E402
 from profile_features import load_run_labels    # noqa: E402
 
-SIZES = {'gateway': dict(sent=2413, pay=1643, ack=21), 'client': dict(sent=2452, pay=1673, ack=51)}
+SIZES = {'gateway': dict(sent=2413, pay=1643, ack=21)}
 PLAN_COLS = ['dataset', 'condition', 'strategy', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min', 'message_size',
              'clients']
 
@@ -99,11 +97,12 @@ def process_run(run_dir, view, plan_row, cache):
     return run_dir.name, view, len(sessions), len(df)
 
 
-def write_splits(runs, out, seed):
-    """70 / 15 / 15 by run within each condition x strategy cell of A (at least one run in train);
+def write_splits(runs, out, seed, by):
+    """70 / 15 / 15 by run within each group of A (condition x strategy cell, or condition);
     every B run is test (unseen rates)."""
     rng = random.Random(seed); rows = []
-    for (ds, cond, strat), g in runs.groupby(['dataset', 'condition', 'strategy']):
+    keys = ['dataset', 'condition'] + (['strategy'] if by == 'cell' else [])
+    for (ds, *_), g in runs.groupby(keys):
         ids = sorted(g['run_id']); rng.shuffle(ids)
         if ds == 'B':
             rows += [(r, 'test') for r in ids]; continue
@@ -121,11 +120,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--sweep', required=True, help='the runner\'s output dir (with manifest.csv and runs/)')
     ap.add_argument('--out', required=True)
-    ap.add_argument('--views', default='gateway,client')
+    ap.add_argument('--views', default='gateway', choices=sorted(SIZES))
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--include-degraded', action='store_true')
     ap.add_argument('--runs', help='comma-separated run ids (default: all finished clean runs)')
     ap.add_argument('--splits', action='store_true', help='also write OUT/splits.csv')
+    ap.add_argument('--split-by', choices=['condition', 'cell'], default='condition',
+                    help='70/15/15 within each condition, or within each condition x strategy cell')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     sweep, out = Path(a.sweep).expanduser(), Path(a.out).expanduser()
@@ -158,7 +159,7 @@ def main():
             print(f'pairs_{v}.csv: {table["dataset"].nunique()} runs, {int(table[table["L"] == 0]["label"].sum())} '
                   f'true pairs, {len(table)} rows')
     if a.splits:
-        write_splits(runs, out / 'splits.csv', a.seed)
+        write_splits(runs, out / 'splits.csv', a.seed, a.split_by)
     if failed:
         print(f'{len(failed)} jobs failed: {failed}')
 

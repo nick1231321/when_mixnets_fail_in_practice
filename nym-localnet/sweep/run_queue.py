@@ -6,7 +6,6 @@ Per run (OUT/runs/<run_id>/):
   config.toml, run.json, clients.csv, messages.csv, lag.csv, load_test.log   the load test's own output
   monitor.csv, verdict.json                                                  resource monitor (resmon)
   gateway_wire/wire-<gateway host>.csv.gz   the gateways' wire log, only the bytes written during this run
-  client_wire/wire-*.csv.gz                 the clients' own wire log (every websocket message, both ways)
   capture/<gateway>.pcap                    tcpdump of the client<->gateway links (only with --capture-every)
   DONE                                      written last; runs with it are skipped on restart
 and one row per run in OUT/manifest.csv (plan values + delivery, verdict, status, sizes).
@@ -170,16 +169,6 @@ def slice_gateway_logs(before, run_dir):
     return total / 1e6
 
 
-def gzip_dir(d):
-    total = 0
-    for p in d.glob('*.csv'):
-        total += p.stat().st_size
-        with open(p, 'rb') as f, gzip.open(f'{p}.gz', 'wb', compresslevel=6) as g:
-            shutil.copyfileobj(f, g)
-        p.unlink()
-    return total / 1e6
-
-
 def parse_load_test(log_path):
     delivered, p95 = [], []
     for line in log_path.read_text(errors='replace').splitlines():
@@ -194,13 +183,12 @@ def run_one(row, out, capture, timeout_s):
     if run_dir.exists():
         shutil.rmtree(run_dir)           # an unfinished earlier attempt
     run_dir.mkdir(parents=True)
-    (run_dir / 'client_wire').mkdir()
     (run_dir / 'config.toml').write_text(config_toml(row, run_dir))
     before = gateway_sizes()
     started = datetime.now().isoformat(timespec='seconds')
     if capture:
         sh([str(LOCAL / 'linkobs/capture.sh'), 'start', str(run_dir / 'capture')])
-    env = dict(os.environ, MIXCORR_WIRE_DIR=str(run_dir / 'client_wire'))
+    env = {k: v for k, v in os.environ.items() if k != 'MIXCORR_WIRE_DIR'}   # the clients log nothing
     cmd = [sys.executable, str(LOCAL / 'resmon/resmon.py'), 'wrap', str(run_dir),
            '--load-test-log', str(run_dir / 'load_test.log'), '--',
            'sh', '-c', f'"{BIN}" "{run_dir / "config.toml"}" > "{run_dir / "load_test.log"}" 2>&1']
@@ -218,7 +206,6 @@ def run_one(row, out, capture, timeout_s):
         (run_dir / 'capture' / 'capture.log').write_text(stop.stdout + stop.stderr)   # captured / dropped counts
     time.sleep(2)                        # let the gateways flush their last lines
     gw_mb = slice_gateway_logs(before, run_dir)
-    cl_mb = gzip_dir(run_dir / 'client_wire')
     pcap_mb = sum(p.stat().st_size for p in (run_dir / 'capture').glob('*.pcap')) / 1e6 if capture else 0
     delivered, p95 = parse_load_test(run_dir / 'load_test.log')
     try:
@@ -234,7 +221,7 @@ def run_one(row, out, capture, timeout_s):
         status = 'degraded'              # below 99 % delivery or machine saturated: excluded later
     return dict(started=started, finished=datetime.now().isoformat(timespec='seconds'), exit=code,
                 delivered_min_pct=delivered, latency_p95_ms=p95, verdict=verdict, reasons=reasons, status=status,
-                gateway_wire_mb=round(gw_mb, 1), client_wire_mb=round(cl_mb, 1), pcap_mb=round(pcap_mb, 1))
+                gateway_wire_mb=round(gw_mb, 1), client_wire_mb=0, pcap_mb=round(pcap_mb, 1))
 
 
 # ----------------------------------------------------------------------------- main loop
@@ -317,7 +304,7 @@ def main():
                 w.writerow({**row, **res})
             (out / 'runs' / row['run_id'] / 'DONE').write_text(res['finished'])
             log(f'   -> {res["status"]}: delivered {res["delivered_min_pct"]}%, p95 {res["latency_p95_ms"]} ms, '
-                f'{res["verdict"]}; gw {res["gateway_wire_mb"]} MB, clients {res["client_wire_mb"]} MB')
+                f'{res["verdict"]}; gw {res["gateway_wire_mb"]} MB, pcap {res["pcap_mb"]} MB')
             done += 1
         log(f'finished {done} runs this session')
     finally:
