@@ -65,8 +65,12 @@ TAG = "[path-selection] "
 PATH = r"\[(?P<path>\d+, \d+, \d+)\]"
 ROUTING_CONFIG = (
     r"real: (?P<real>\w+), real-ack: (?P<real_ack>\w+), "
-    r"cover: (?P<cover>\w+), cover-ack: (?P<cover_ack>\w+)"
+    r"cover: (?P<cover>\w+), cover-ack: (?P<cover_ack>\w+)(?:, session: (?P<session>\w+))?"
 )
+SESSION_ENDED = re.compile(
+    r"^session (?P<s>\S+) ended after (?P<n>\d+) packets \((?:message complete|a message session ended)\)$"
+)
+NO_SESSION_TO_END = re.compile(r"^session (?P<s>\S+): message complete, no session to end$")
 STARTUP = re.compile(rf"^routes will use (?P<strategy>.+); routing {ROUTING_CONFIG}$")
 NEW_KHF = re.compile(r"^new session (?P<s>\S+): K-HF fixed nodes per layer \[(?P<fixed>.*)\]$")
 NEW_KW = re.compile(
@@ -283,7 +287,7 @@ class Verifier:
         if self.strategy.name == "baseline":
             expected = {attr: "strategy" for attr, _ in CLASSES}  # the flags are not passed
         self.check(
-            m is not None and m.groupdict() == expected,
+            m is not None and {attr: m.group(attr) for attr, _ in CLASSES} == expected,
             f"client reports routing {expected}",
         )
 
@@ -307,7 +311,20 @@ class Verifier:
         if m := KW_CLAMPED.match(msg):
             self.clamped_layers.add(int(m.group("layer")))
             return None
+        if m := SESSION_ENDED.match(msg):
+            return self.on_session_ended(m, where)
+        if NO_SESSION_TO_END.match(msg):
+            return None
         self.error(f"unrecognized path selection message: {where}")
+
+    def on_session_ended(self, m, where):
+        # per-message sessions: the session is removed and may be created again afterwards
+        s = m.group("s")
+        session = self.sessions.pop(s, None)
+        if session is None:
+            self.error(f"session {s} ended but was never created: {where}")
+        elif session.packets != int(m.group("n")):
+            self.error(f"session {s} ended after {m.group('n')} packets, counted {session.packets}: {where}")
 
     def on_startup(self, i, m, where):
         self.check(i == 0, "startup message comes first")
@@ -315,7 +332,7 @@ class Verifier:
             m.group("strategy") == self.strategy.rust_debug,
             f"selector uses {self.strategy.rust_debug} (got {m.group('strategy')})",
         )
-        routing = {attr: m.group(attr) for attr, _ in CLASSES}
+        routing = {attr: m.group(attr) for attr, _ in CLASSES}   # the session scope is not checked here
         self.check(
             routing == self.run.routing_config,
             f"selector uses routing {self.run.routing_config} (got {routing})",

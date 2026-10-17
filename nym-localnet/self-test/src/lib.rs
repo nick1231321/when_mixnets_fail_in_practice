@@ -7,6 +7,9 @@
 //!   --strategy STRATEGY          path selection strategy (see "When Mixnets Fail", NDSS 2026):
 //!                                `baseline` (default), `khf:LAYERS` (e.g. `khf:1,2`),
 //!                                `kw:K` (e.g. `kw:2`) or `alpha:ALPHA` (e.g. `alpha:0.8`)
+//!   --session SCOPE              how long a path selection session lasts: `connection`
+//!                                (default) or `message` (ends when a message's last fragment
+//!                                is prepared; the loop cover session is drawn anew too)
 //!   --size BYTES                 size of the message sent to ourselves (default: a short
 //!                                greeting). Each sphinx packet carries ~2 KB, so e.g. 100000
 //!                                spreads the message over ~50 packets of the same session.
@@ -23,7 +26,9 @@
 
 pub mod load_test;
 
-use nym_sdk::mixnet::{self, MixnetMessageSender, PathSelectionStrategy, Routing, RoutingConfig};
+use nym_sdk::mixnet::{
+    self, MixnetMessageSender, PathSelectionStrategy, Routing, RoutingConfig, SessionScope,
+};
 use nym_topology::provider_trait::{async_trait, TopologyProvider};
 use nym_topology::NymTopology;
 use std::path::PathBuf;
@@ -115,6 +120,7 @@ async fn self_test(
         .real_ack_routing(routing_config.real_ack)
         .cover_routing(routing_config.cover)
         .cover_ack_routing(routing_config.cover_ack)
+        .session_scope(routing_config.session_scope)
         .build()
         .expect("failed to build client")
         .connect_to_mixnet()
@@ -198,6 +204,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         } else if let Some(routing) = routing_flag(&mut parsed.routing_config, &arg) {
             let value = args.next().ok_or(format!("{arg} requires a value"))?;
             *routing = value.parse()?;
+        } else if arg == "--session" {
+            let value = args.next().ok_or("--session requires a value")?;
+            parsed.routing_config.session_scope = value.parse::<SessionScope>()?;
         } else if arg.starts_with("--") {
             return Err(format!("unknown option '{arg}'"));
         } else {
@@ -324,6 +333,7 @@ mod tests {
                 real_ack: Routing::Strategy,
                 cover: Routing::Baseline,
                 cover_ack: Routing::Strategy,
+                ..Default::default()
             }
         );
 
@@ -341,8 +351,22 @@ mod tests {
                 real_ack: Routing::Baseline,
                 cover: Routing::Strategy,
                 cover_ack: Routing::Baseline,
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn session_scope_is_parsed() {
+        assert_eq!(
+            parse(&[]).unwrap().routing_config.session_scope,
+            SessionScope::Connection
+        );
+        assert_eq!(
+            parse(&["--session", "message"]).unwrap().routing_config.session_scope,
+            SessionScope::Message
+        );
+        assert!(parse(&["--session", "forever"]).is_err());
     }
 
     #[test]

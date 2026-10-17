@@ -12,7 +12,11 @@
 //! recipient's session, and loop cover traffic uses the session of the client's own address.
 //! [`RoutingConfig`] can instead give each traffic class (real traffic, acks of real traffic,
 //! loop cover traffic, acks of loop cover traffic) independent uniform routes that leave the
-//! sessions untouched.
+//! sessions untouched, and sets the [`SessionScope`]: a session lasts for the connection
+//! (default) or for one message, as in the paper, where a session is one data exchange. With
+//! per-message sessions the sender ends the recipient's session once a message's last fragment
+//! is prepared ([`PathSelector::end_session`]), and the loop cover session is drawn anew at the
+//! same moment, so the whole client changes nodes together.
 //!
 //! Routing decisions are logged under the `nym_topology::path_selection` target: new sessions
 //! at `info` and every chosen route at `debug`.
@@ -93,7 +97,42 @@ impl std::str::FromStr for Routing {
     }
 }
 
-/// [`Routing`] of each traffic class of a client.
+/// How long a path selection session lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionScope {
+    /// One session per recipient for the client's lifetime (the session state is never reset).
+    #[default]
+    Connection,
+
+    /// One session per message: the recipient's session ends when a message's last fragment has
+    /// been prepared, and the loop cover session is drawn anew at the same time.
+    Message,
+}
+
+impl std::fmt::Display for SessionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SessionScope::Connection => "connection",
+            SessionScope::Message => "message",
+        })
+    }
+}
+
+impl std::str::FromStr for SessionScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "connection" => Ok(SessionScope::Connection),
+            "message" => Ok(SessionScope::Message),
+            _ => Err(format!(
+                "invalid session scope '{value}' (expected 'connection' or 'message')"
+            )),
+        }
+    }
+}
+
+/// [`Routing`] of each traffic class of a client, and how long its sessions last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoutingConfig {
     /// Real traffic: forward data packets and the reply SURBs they carry.
@@ -107,6 +146,9 @@ pub struct RoutingConfig {
 
     /// SURB-ACKs carried by loop cover packets.
     pub cover_ack: Routing,
+
+    /// Whether a session lasts for the connection or for one message.
+    pub session_scope: SessionScope,
 }
 
 impl RoutingConfig {
@@ -125,8 +167,8 @@ impl std::fmt::Display for RoutingConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "real: {}, real-ack: {}, cover: {}, cover-ack: {}",
-            self.real, self.real_ack, self.cover, self.cover_ack
+            "real: {}, real-ack: {}, cover: {}, cover-ack: {}, session: {}",
+            self.real, self.real_ack, self.cover, self.cover_ack, self.session_scope
         )
     }
 }
@@ -184,6 +226,9 @@ enum SessionState {
 struct Session {
     state: SessionState,
     packets: u64,
+    /// The selector's generation when the session was created; a loop cover session whose
+    /// generation is behind is drawn anew (per-message scope, see [`PathSelector::end_session`]).
+    generation: u64,
 }
 
 /// Chooses mix routes according to a [`PathSelectionStrategy`], keeping per-session state.
@@ -192,6 +237,8 @@ pub struct PathSelector {
     strategy: PathSelectionStrategy,
     routing_config: RoutingConfig,
     sessions: HashMap<RecipientBytes, Session>,
+    /// Incremented every time a message session ends (per-message scope).
+    generation: u64,
 }
 
 /// [`PathSelector`] shared between all senders of a client.
@@ -275,6 +322,7 @@ impl PathSelector {
             strategy,
             routing_config: RoutingConfig::default(),
             sessions: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -307,6 +355,24 @@ impl PathSelector {
 
     pub fn strategy(&self) -> &PathSelectionStrategy {
         &self.strategy
+    }
+
+    /// Ends the session with `recipient` because a message to it is complete (its last fragment
+    /// has been prepared): the next packet to `recipient` starts a fresh session, and so does the
+    /// next loop cover packet. A no-op unless the routing config's session scope is per message.
+    pub fn end_session(&mut self, recipient: &Recipient) {
+        if self.routing_config.session_scope != SessionScope::Message {
+            return;
+        }
+        let label = session_label(recipient);
+        match self.sessions.remove(&recipient.to_bytes()) {
+            Some(session) => info!(
+                "[path-selection] session {label} ended after {} packets (message complete)",
+                session.packets
+            ),
+            None => debug!("[path-selection] session {label}: message complete, no session to end"),
+        }
+        self.generation += 1;
     }
 
     pub fn routing_config(&self) -> &RoutingConfig {
@@ -344,13 +410,30 @@ impl PathSelector {
             return Ok(path);
         }
 
+        // per-message scope: loop cover traffic has no message boundary, so its session is drawn
+        // anew whenever a message session of this client ended (the generation moved on)
+        if matches!(kind, RouteKind::Cover | RouteKind::CoverAck) {
+            let stale = self
+                .sessions
+                .get(&recipient.to_bytes())
+                .is_some_and(|session| session.generation != self.generation);
+            if stale {
+                let ended = self.sessions.remove(&recipient.to_bytes()).unwrap();
+                info!(
+                    "[path-selection] session {label} ended after {} packets (a message session ended)",
+                    ended.packets
+                );
+            }
+        }
         let strategy = &self.strategy;
+        let generation = self.generation;
         let session = self
             .sessions
             .entry(recipient.to_bytes())
             .or_insert_with(|| Session {
                 state: Self::new_session_state(rng, strategy, &layers, &label),
                 packets: 0,
+                generation,
             });
         session.packets += 1;
         let packet = session.packets;
@@ -613,6 +696,46 @@ mod tests {
         )
     }
 
+    /// Per-packet cost of `select_path` as a session ages, on the localnet's 20-per-layer topology
+    /// (8,000 routes), all packets in one session. Timing only, no assertions; run with
+    /// `cargo test --release -p nym-topology select_path_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn select_path_cost() {
+        const WIDTH: usize = 20;
+        const TOTAL: usize = 15_000;
+        const BUCKET: usize = 1_000;
+        let strategies = [
+            ("baseline", PathSelectionStrategy::Baseline),
+            ("khf:1,2", PathSelectionStrategy::KHopsFixed { fixed_layers: vec![1, 2] }),
+            ("kw:2", PathSelectionStrategy::KOverW { k: 2 }),
+            ("alpha:0.5", PathSelectionStrategy::AlphaSticky { alpha: 0.5 }),
+        ];
+        println!("µs per select_path call, by packet index (one session, {WIDTH}^3 routes)");
+        for (name, strategy) in strategies {
+            let mut rng = rng();
+            let topology = test_topology(&mut rng, WIDTH);
+            let recipient = test_recipient(&mut rng);
+            let mut selector = PathSelector::new(strategy);
+            let mut row = Vec::new();
+            for _ in 0..TOTAL / BUCKET {
+                let start = std::time::Instant::now();
+                for _ in 0..BUCKET {
+                    selector
+                        .select_path(&mut rng, &topology, &recipient, RouteKind::Cover)
+                        .unwrap();
+                }
+                row.push(start.elapsed().as_secs_f64() * 1e6 / BUCKET as f64);
+            }
+            let leading = match selector.sessions.values().next().map(|s| &s.state) {
+                Some(SessionState::AlphaSticky { leading, .. }) => leading.len().to_string(),
+                _ => "-".into(),
+            };
+            let cells: Vec<String> = row.iter().map(|us| format!("{us:7.1}")).collect();
+            println!("{name:>10}: {}  (leading set {leading})", cells.join(" "));
+        }
+    }
+
     fn run(strategy: PathSelectionStrategy, packets: usize) -> (PathSelector, Vec<MixPath>) {
         run_with_width(strategy, packets, W)
     }
@@ -870,6 +993,7 @@ mod tests {
             real_ack: Routing::Baseline,
             cover: Routing::Baseline,
             cover_ack: Routing::Baseline,
+            ..Default::default()
         };
         let mut selector = PathSelector::new(all_layers_fixed()).with_routing_config(config);
         for kind in ALL_KINDS {
@@ -885,6 +1009,76 @@ mod tests {
         assert_eq!("strategy".parse(), Ok(Routing::Strategy));
         assert_eq!("baseline".parse(), Ok(Routing::Baseline));
         assert!("random".parse::<Routing>().is_err());
+    }
+
+    #[test]
+    fn connection_scope_never_ends_a_session() {
+        let mut rng = rng();
+        let topology = test_topology(&mut rng, W);
+        let alice = test_recipient(&mut rng);
+        let mut selector = PathSelector::new(PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1, 2],
+        });
+        for _ in 0..5 {
+            selector
+                .select_path(&mut rng, &topology, &alice, RouteKind::Real)
+                .unwrap();
+        }
+        selector.end_session(&alice); // a no-op in the default scope
+        assert_eq!(selector.sessions[&alice.to_bytes()].packets, 5);
+    }
+
+    #[test]
+    fn message_scope_ends_the_session_and_redraws_loop_cover() {
+        let mut rng = rng();
+        let topology = test_topology(&mut rng, W);
+        let alice = test_recipient(&mut rng);
+        let me = test_recipient(&mut rng);
+        let mut selector = PathSelector::new(PathSelectionStrategy::KHopsFixed {
+            fixed_layers: vec![1, 2, 3],
+        })
+        .with_routing_config(RoutingConfig {
+            session_scope: SessionScope::Message,
+            ..Default::default()
+        });
+
+        // a message of 5 fragments to alice, loop cover in between
+        for _ in 0..5 {
+            selector
+                .select_path(&mut rng, &topology, &alice, RouteKind::Real)
+                .unwrap();
+        }
+        let loop_route = selector
+            .select_path(&mut rng, &topology, &me, RouteKind::Cover)
+            .unwrap();
+        assert_eq!(selector.sessions[&alice.to_bytes()].packets, 5);
+        assert_eq!(selector.sessions[&me.to_bytes()].packets, 1);
+
+        selector.end_session(&alice);
+        assert!(!selector.sessions.contains_key(&alice.to_bytes()));
+        // the loop session still exists but is stale, and is drawn anew on its next packet
+        assert_eq!(selector.sessions[&me.to_bytes()].generation, 0);
+        let mut changed = false;
+        for _ in 0..20 {
+            let r = selector
+                .select_path(&mut rng, &topology, &me, RouteKind::Cover)
+                .unwrap();
+            if r != loop_route {
+                changed = true;
+            }
+        }
+        assert_eq!(selector.sessions[&me.to_bytes()].generation, 1);
+        assert_eq!(selector.sessions[&me.to_bytes()].packets, 20);
+        // a fully fixed route only changes if the new session drew different nodes; with W^3
+        // routes this fails with probability 1/W^3 per redraw, fine for a seeded rng
+        assert!(changed, "loop cover session was not drawn anew");
+
+        // the next message to alice starts a fresh session, counting from 1
+        selector
+            .select_path(&mut rng, &topology, &alice, RouteKind::Real)
+            .unwrap();
+        assert_eq!(selector.sessions[&alice.to_bytes()].packets, 1);
+        assert_eq!(selector.sessions[&alice.to_bytes()].generation, 1);
     }
 
     #[test]

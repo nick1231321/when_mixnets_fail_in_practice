@@ -34,7 +34,7 @@ SAMPLE_MIXES = [f'{PROJECT}-mix1', f'{PROJECT}-mix30', f'{PROJECT}-mix60']
 MANIFEST_COLS = ['run_id', 'dataset', 'condition', 'strategy', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min',
                  'load_factor', 'message_size', 'clients', 'pkt_per_s', 'duration_s', 'warmup_s', 'drain_s', 'replicate', 'seed',
                  'started', 'finished', 'exit', 'delivered_min_pct', 'latency_p95_ms', 'verdict', 'reasons',
-                 'status', 'netem_reapplied', 'gateway_wire_mb', 'client_wire_mb', 'pcap_mb', 'clients_spec']
+                 'status', 'netem_reapplied', 'gateway_wire_mb', 'client_wire_mb', 'pcap_mb', 'clients_spec', 'session']
 
 
 def log(msg):
@@ -123,12 +123,13 @@ def groups_toml(row):
     """One group for a homogeneous run; one group per client (its own mu and sending interval) for a
     heterogeneous run (plan column clients_spec, initiators first, paired by split-pairs)."""
     spec = json.loads(row['clients_spec']) if row.get('clients_spec') else None
+    session = f'session = "{row["session"]}"\n' if row.get('session') else ''   # path-selection session scope
     if spec is None:
         return 'random-pairs', f'''[[group]]
 name = "g"
 count = {row["clients"]}
 strategy = "{row["strategy"]}"
-average_packet_delay_ms = {row["mu_ms"]}
+{session}average_packet_delay_ms = {row["mu_ms"]}
 message_sending_average_delay_ms = {row["send_ms"]}
 loop_cover_traffic_average_delay_ms = {row["loop_ms"]}
 '''
@@ -141,7 +142,7 @@ loop_cover_traffic_average_delay_ms = {row["loop_ms"]}
 name = "c{k:02d}"
 count = 1
 strategy = "{row["strategy"]}"
-average_packet_delay_ms = {mu}
+{session}average_packet_delay_ms = {mu}
 message_sending_average_delay_ms = {send}
 loop_cover_traffic_average_delay_ms = {loop}
 {toggles}'''

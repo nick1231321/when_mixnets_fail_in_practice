@@ -99,7 +99,7 @@ pub use native_client::MixnetClientSender;
 #[cfg(feature = "fs-storage")]
 pub use nym_client_core::client::key_manager::persistence::Passphrase;
 pub use nym_topology::PathSelectionStrategy;
-pub use nym_topology::path_selection::{Routing, RoutingConfig};
+pub use nym_topology::path_selection::{Routing, RoutingConfig, SessionScope};
 #[cfg(feature = "fs-storage")]
 pub use paths::StoragePaths;
 pub use sink::{MixnetMessageSink, MixnetMessageSinkTranslator};

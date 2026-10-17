@@ -545,6 +545,15 @@ where
             pending_acks.push(pending_ack);
         }
 
+        // the message is complete: with per-message path selection sessions, the recipient's
+        // session ends here (its retransmissions, if any, start a new one)
+        if let Some(selector) = &self.config.path_selector {
+            selector
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .end_session(&recipient);
+        }
+
         self.insert_pending_acks(pending_acks);
         self.forward_messages(real_messages, lane).await;
 

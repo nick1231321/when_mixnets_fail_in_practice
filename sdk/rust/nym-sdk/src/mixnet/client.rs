@@ -25,7 +25,7 @@ use nym_client_core::init::types::{GatewaySelectionSpecification, GatewaySetup};
 use nym_client_core::init::{refresh_gateway_published_data, setup_gateway};
 use nym_crypto::hkdf::DerivationMaterial;
 use nym_task::ShutdownTracker;
-use nym_topology::path_selection::{Routing, RoutingConfig};
+use nym_topology::path_selection::{Routing, RoutingConfig, SessionScope};
 use nym_topology::provider_trait::TopologyProvider;
 use nym_topology::{PathSelectionStrategy, RoutingNode};
 use nym_validator_client::{QueryHttpRpcNyxdClient, UserAgent, nyxd};
@@ -292,6 +292,14 @@ where
     #[must_use]
     pub fn cover_routing(mut self, routing: Routing) -> Self {
         self.routing_config.cover = routing;
+        self
+    }
+
+    /// Set how long a path selection session lasts: for the connection (default) or for one
+    /// message, after which the recipient's session and the loop cover session are drawn anew.
+    #[must_use]
+    pub fn session_scope(mut self, scope: SessionScope) -> Self {
+        self.routing_config.session_scope = scope;
         self
     }
 
@@ -1147,6 +1155,7 @@ mod tests {
                 real_ack: Routing::Strategy,
                 cover: Routing::Strategy,
                 cover_ack: Routing::Baseline,
+                ..Default::default()
             }
         );
 
@@ -1162,8 +1171,15 @@ mod tests {
                 real_ack: Routing::Baseline,
                 cover: Routing::Baseline,
                 cover_ack: Routing::Strategy,
+                ..Default::default()
             }
         );
+
+        let client = MixnetClientBuilder::new_ephemeral()
+            .session_scope(SessionScope::Message)
+            .build()
+            .unwrap();
+        assert_eq!(client.routing_config.session_scope, SessionScope::Message);
     }
 
     #[test]

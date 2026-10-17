@@ -81,6 +81,7 @@ own address and waits up to 60 s for it to come back. It prints `SUCCESS` (exit 
 | `--real-ack-routing R` | `strategy` | Routing of the acks of real traffic. |
 | `--cover-routing R` | `strategy` | Routing of loop cover traffic. |
 | `--cover-ack-routing R` | `strategy` | Routing of the acks of loop cover traffic. |
+| `--session SCOPE` | `connection` | How long a path-selection session lasts: `connection` (never reset) or `message` (ends when a message's last fragment is prepared; the loop cover session is drawn anew at the same time), the paper's session = one data exchange. |
 
 ## Routing of each traffic class
 

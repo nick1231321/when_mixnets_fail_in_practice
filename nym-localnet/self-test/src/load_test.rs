@@ -19,7 +19,7 @@
 use crate::{parse_strategy, FileTopologyProvider};
 use nym_sdk::mixnet::{
     self, MixnetClient, MixnetMessageSender, PathSelectionStrategy, Recipient, Routing,
-    RoutingConfig,
+    RoutingConfig, SessionScope,
 };
 use nym_sdk::DebugConfig;
 use nym_sphinx_chunking::instrumentation;
@@ -118,6 +118,9 @@ struct GroupConfig {
     real_ack_routing: Option<String>,
     cover_routing: Option<String>,
     cover_ack_routing: Option<String>,
+    /// How long a path selection session lasts: "connection" (default) or "message" (ends when a
+    /// message's last fragment is prepared; the loop cover session is drawn anew too).
+    session: Option<String>,
     // per-group traffic overrides; default to the top-level values. Set different values on
     // different groups to run one experiment with heterogeneous traffic, to test flow matching
     // under a realistic traffic mix. The three *stream* parameters below are what a gateway
@@ -195,6 +198,10 @@ impl Group {
                 real_ack: routing(&config.real_ack_routing)?,
                 cover: routing(&config.cover_routing)?,
                 cover_ack: routing(&config.cover_ack_routing)?,
+                session_scope: config
+                    .session
+                    .as_deref()
+                    .map_or(Ok(SessionScope::Connection), str::parse::<SessionScope>)?,
             },
             message_size,
             rate_per_min,
@@ -390,6 +397,7 @@ async fn connect(
         .real_ack_routing(group.routing.real_ack)
         .cover_routing(group.routing.cover)
         .cover_ack_routing(group.routing.cover_ack)
+        .session_scope(group.routing.session_scope)
         .build()
         .map_err(|err| format!("failed to build client: {err}"))?
         .connect_to_mixnet()
@@ -780,20 +788,21 @@ fn write_clients(
     addresses: &[Recipient],
 ) -> Result<(), String> {
     let mut csv = String::from(
-        "client,group,strategy,real_routing,real_ack_routing,cover_routing,cover_ack_routing,gateway,partner,tag,wire_tag,rate_per_min,message_size,address\n",
+        "client,group,strategy,real_routing,real_ack_routing,cover_routing,cover_ack_routing,session,gateway,partner,tag,wire_tag,rate_per_min,message_size,address\n",
     );
     for (index, address) in addresses.iter().enumerate() {
         let group = &groups[client_group[index]];
         let partner = plan.partner[index].map_or(String::new(), |p| p.to_string());
         let _ = writeln!(
             csv,
-            "{index},\"{}\",\"{}\",{},{},{},{},{},{partner},{},{},{},{},{address}",
+            "{index},\"{}\",\"{}\",{},{},{},{},{},{},{partner},{},{},{},{},{address}",
             group.name,
             group.strategy_arg,
             group.routing.real,
             group.routing.real_ack,
             group.routing.cover,
             group.routing.cover_ack,
+            group.routing.session_scope,
             gateways[plan.gateway[index]],
             instrumentation::recipient_tag(address),
             // tag the wire-level events carry (hash of the client's identity key), so the
@@ -895,6 +904,7 @@ fn write_run(
                 "loop_cover_traffic": g.loop_cover_traffic, "poisson_sending": g.poisson_sending,
                 "real_routing": g.real_routing, "real_ack_routing": g.real_ack_routing,
                 "cover_routing": g.cover_routing, "cover_ack_routing": g.cover_ack_routing,
+                "session": g.session,
             })).collect::<Vec<_>>(),
         },
         "timeline_ns": {

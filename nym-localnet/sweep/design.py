@@ -71,6 +71,8 @@ def main():
     ap.add_argument('--warmup', type=int, default=10)
     ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight, s')
     ap.add_argument('--message-size', type=int, default=1_000_000, help='bytes per real message (file)')
+    ap.add_argument('--session', choices=['message', 'connection'], default='message',
+                    help='path-selection session scope: one per message (the paper\'s model) or per connection')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     rng = random.Random(a.seed)
@@ -83,7 +85,7 @@ def main():
             return
         clients = clients_for(s['send_ms'], s['loop_ms'], load * a.capacity, a.max_clients)
         for rep in range(n_runs or math.ceil(a.pairs_a / (clients // 2))):
-            rows.append(dict(dataset=dataset, condition=condition, strategy=strategy, **s, load_factor=load,
+            rows.append(dict(dataset=dataset, condition=condition, strategy=strategy, session=a.session, **s, load_factor=load,
                              clients=clients, message_size=a.message_size, pkt_per_s=round(clients * client_rate(s['send_ms'], s['loop_ms'])),
                              duration_s=a.duration, warmup_s=a.warmup, drain_s=a.drain, replicate=rep))
 
@@ -100,8 +102,8 @@ def main():
     for i, r in enumerate(rows):
         r['run_id'] = f'r{i:05d}'
         r['seed'] = 1000 + i
-    cols = ['run_id', 'dataset', 'condition', 'strategy', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min', 'load_factor',
-            'message_size', 'clients', 'pkt_per_s', 'duration_s', 'warmup_s', 'drain_s', 'replicate', 'seed']
+    cols = ['run_id', 'dataset', 'condition', 'strategy', 'session', 'send_ms', 'mu_ms', 'loop_ms', 'msg_per_min',
+            'load_factor', 'message_size', 'clients', 'pkt_per_s', 'duration_s', 'warmup_s', 'drain_s', 'replicate', 'seed']
     with open(a.out, 'w', newline='') as fh:
         w = csv.DictWriter(fh, fieldnames=cols); w.writeheader(); w.writerows(rows)
 

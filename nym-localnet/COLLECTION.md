@@ -67,7 +67,7 @@ python3 sweep/design_hetero.py --out ~/flow-matching-data/hetero/plan.csv
 python3 sweep/design.py --strategies khf --out ~/flow-matching-data/khf/plan.csv
 ```
 
-Both size each run so that the clients' total packet rate stays at `--clean-load` (0.6) × `--capacity` (1,600 packets/s, our machine; calibrate yours by raising the client count until delivery drops below 99 %).
+`design.py --session message|connection` sets the path-selection session scope (default `message`: a session is one file, as in Rahimi's model; `connection`: never reset). Both planners size each run so that the clients' total packet rate stays at `--clean-load` (0.6) × `--capacity` (1,600 packets/s, our machine; calibrate yours by raising the client count until delivery drops below 99 %).
 
 ### 1.7 Collect
 
