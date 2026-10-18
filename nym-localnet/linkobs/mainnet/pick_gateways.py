@@ -2,7 +2,7 @@
 """Write a mainnet load-test config: picks entry gateways of the live Nym network from the nym-api.
 
   pick_gateways.py --out CONFIG.toml --output-dir RUN_DIR [--gateways 2] [--clients 10] [--seed 1]
-                   [--duration 240] [--min-performance 0.95]
+                   [--duration 240] [--drain 60] [--min-performance 0.95]
 
 Only entry gateways (current rewarded set) with a client websocket port and performance at or above
 the threshold are eligible; among them the choice is seeded, so a run is reproducible. The clients
@@ -20,6 +20,7 @@ def main():
     ap.add_argument('--gateways', type=int, default=2); ap.add_argument('--clients', type=int, default=10)
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--duration', type=int, default=240)
     ap.add_argument('--min-performance', type=float, default=0.95)
+    ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight after the sending window, s')
     ap.add_argument('--strategy', default='baseline', help='path-selection strategy of the (single) group, e.g. khf:1,2, kw:2, alpha:0.5')
     ap.add_argument('--groups', default='', help='heterogeneous profiles: "name:count:mix_ms:send_ms:loop_ms:msgs_per_min:msg_bytes;..." '
                     '(empty field = client default); counts must add up to --clients')
@@ -41,7 +42,7 @@ gateways = [
 output_dir = "{a.output_dir}"
 duration_s = {a.duration}
 warmup_s = 5
-drain_s = 60
+drain_s = {a.drain}
 message_size = 50000
 messages_per_client_per_min = 6.0
 pairing = "random-pairs"
@@ -57,7 +58,7 @@ ack_wait_addition_s = 10
         total = 0
         for spec in a.groups.split(';'):
             f = spec.split(':'); name, count = f[0], int(f[1]); total += count
-            cfg += f'[[group]]\nname = "{name}"\ncount = {count}\nstrategy = "baseline"\n'
+            cfg += f'[[group]]\nname = "{name}"\ncount = {count}\nstrategy = "{a.strategy}"\n'
             for k, v in zip(keys, f[2:]):
                 if v != '':
                     cfg += f'{k} = {float(v) if k == "messages_per_client_per_min" else int(v)}\n'
