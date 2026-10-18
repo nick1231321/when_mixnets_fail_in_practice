@@ -10,7 +10,8 @@
 # OUT_DIR/ gets: config.toml, the load test's files (clients.csv, messages.csv, run.json, ...),
 #   monitor.csv + verdict.json, capture/link.pcap, capture/capture.log, and the extracted wire view
 #   capture/link.frames.csv.gz (plain ws://, one row per WebSocket frame) or
-#   capture/link.segments.csv.gz (wss://, one row per TCP segment) — see linkobs/pcap_streams.py.
+#   capture/link.segments.csv.gz (wss://, one row per TCP segment) — see linkobs/pcap_streams.py —
+#   and capture/link.identities.csv (conn -> client identity key, read from the ws:// handshake).
 # Needs sudo for tcpdump (run `sudo -v` first so the run is not interrupted by a password prompt).
 # MAINNET_PORTS (default "9000,9001") = the gateways' client ports to capture; MAINNET_IFACE
 # overrides the interface.
@@ -43,7 +44,8 @@ cat "$out/capture/capture.log"
 [ -f "$out/clients.csv" ] || { echo "load test failed, see $out/load_test.log"; exit 1; }
 
 # wire view: WebSocket frames for plain ws:// (port 9000), TCP segments for wss:// (9001)
-python3 "$LOCAL/linkobs/pcap_streams.py" "$out/capture/link.pcap" --gateway-ports "$PORTS" --out "$out/capture/link.frames.csv"
+python3 "$LOCAL/linkobs/pcap_streams.py" "$out/capture/link.pcap" --gateway-ports "$PORTS" --out "$out/capture/link.frames.csv" \
+  --identities "$out/capture/link.identities.csv"
 python3 "$LOCAL/linkobs/pcap_streams.py" "$out/capture/link.pcap" --gateway-ports "$PORTS" --tls --out "$out/capture/link.segments.csv"
 gzip -f "$out/capture/link.frames.csv" "$out/capture/link.segments.csv"
 grep -E "delivered|p50" "$out/load_test.log" | tail -4

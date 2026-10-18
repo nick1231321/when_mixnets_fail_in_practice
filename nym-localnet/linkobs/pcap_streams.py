@@ -17,9 +17,13 @@ and WebSocket data frames are delimited, so every frame is one gateway message c
 Sphinx packet (plus a few bytes of framing).  With --tls the stream is opaque, so each TCP segment
 is one event and link_export.py decomposes segment sizes into cells.
 
+With --identities, the client identity key that each plain ws:// connection sends in its handshake
+(authenticateV2 / handshakePayload, a JSON text frame) is written as conn,identity (base58, as in a
+Nym client address), which labels a connection with its client without any client-side log.
+
 Only the standard library is used; a 240 s run with 30 clients (~2 M segments) parses in ~1 min.
 """
-import argparse, struct, sys, csv
+import argparse, json, struct, sys, csv
 from collections import defaultdict
 
 DLT_NULL, DLT_EN10MB, DLT_RAW, DLT_LOOP, DLT_LINUX_SLL = 0, 1, 12, 108, 113
@@ -82,6 +86,34 @@ def tcp_fields(ip):
     return src, sport, dst, dport, seq, off_flags & 0x1ff, tcp[doff:]
 
 
+B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+
+def b58(raw):
+    n, s = int.from_bytes(raw, 'big'), ''
+    while n:
+        n, r = divmod(n, 58); s = B58[r] + s
+    return '1' * (len(raw) - len(raw.lstrip(b'\0'))) + s
+
+
+def client_identity(frame):
+    """The client's ed25519 identity key (base58) from a masked text frame of the gateway handshake:
+    authenticateV2 carries it as clientIdentity, the registration's handshakePayload as the first
+    32 bytes of data. None for any other frame."""
+    key, data = frame[:4], frame[4:]
+    try:
+        msg = json.loads(bytes(c ^ key[k % 4] for k, c in enumerate(data)))
+    except ValueError:
+        return None
+    if msg.get('type') == 'authenticateV2':
+        raw = msg.get('clientIdentity')
+    elif msg.get('type') == 'handshakePayload':
+        raw = msg.get('data', [])[:32]
+    else:
+        return None
+    return b58(bytes(raw)) if raw and len(raw) == 32 else None
+
+
 class Stream:
     """One direction of one TCP connection: in-order byte stream with per-byte timestamps, plus a
     WebSocket frame parser that skips the HTTP upgrade and emits one event per data frame."""
@@ -95,6 +127,7 @@ class Stream:
         self.consumed = 0          # bytes of buf already parsed (kept small by trimming)
         self.upgraded = False
         self.events = []           # (t_ns, len, opcode)
+        self.identity = None       # client identity key (base58) read from the handshake, to_gw only
 
     def add(self, seq, t_ns, payload, syn):
         # TCP sequence numbers are 32-bit and wrap: work with offsets relative to the first seen
@@ -172,6 +205,8 @@ class Stream:
                 break
             if opcode in (1, 2):                      # text / binary data frame
                 self.events.append((self._time_at(i + hdr + ln), ln, opcode))
+            if opcode == 1 and masked and self.identity is None:
+                self.identity = client_identity(b[i + hdr - 4:i + hdr + ln])
             i += hdr + ln
         self.consumed = i
         self._trim()
@@ -184,6 +219,7 @@ def main():
     ap.add_argument('--tls', action='store_true', help='encrypted stream: emit one event per TCP segment instead of per WebSocket frame')
     ap.add_argument('--conn-prefix', default='', help='prefix for connection ids (e.g. the gateway name when merging captures)')
     ap.add_argument('--out', required=True)
+    ap.add_argument('--identities', help='also write conn,identity (the client identity key from the plain ws:// handshake) to this CSV')
     a = ap.parse_args()
     gw_ports = {int(p) for p in a.gateway_ports.split(',')}
     streams = defaultdict(Stream)        # (conn, direction) -> Stream
@@ -221,6 +257,11 @@ def main():
                 for t_ns, ln, op in s.events:
                     w.writerow([conn, direction, t_ns, ln, 'ws']); total += 1
             print(f'{n} TCP segments, {len(streams)//2} connections, {total} WebSocket data frames -> {a.out}', file=sys.stderr)
+    if a.identities and not a.tls:
+        ids = [(conn, s.identity) for (conn, d), s in streams.items() if d == 'to_gw' and s.identity]
+        with open(a.identities, 'w', newline='') as fh:
+            w = csv.writer(fh); w.writerow(['conn', 'identity']); w.writerows(ids)
+        print(f'{len(ids)} connections with a client identity -> {a.identities}', file=sys.stderr)
 
 
 if __name__ == '__main__':
