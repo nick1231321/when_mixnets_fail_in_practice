@@ -31,7 +31,7 @@ def main():
     for k in range(a.runs):
         kind = 'homo' if k % 2 == 0 else 'hetero'
         if kind == 'homo':
-            groups = f'homo:{a.clients}:::::{MSG_PER_MIN}:{MESSAGE_SIZE}'
+            groups = f'homo:{a.clients}::::{MSG_PER_MIN}:{MESSAGE_SIZE}'
         else:
             groups = ';'.join(f'c{i}:1:{rng.choice(SEEN["mu"])}:{rng.choice(SEEN["send"])}:{rng.choice(SEEN["loop"])}'
                               f':{MSG_PER_MIN}:{MESSAGE_SIZE}' for i in range(a.clients))
