@@ -20,6 +20,8 @@ def main():
     ap.add_argument('--gateways', type=int, default=2); ap.add_argument('--clients', type=int, default=10)
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--duration', type=int, default=240)
     ap.add_argument('--min-performance', type=float, default=0.95)
+    ap.add_argument('--session', choices=['connection', 'message'], default='connection',
+                    help='path-selection session scope: per connection, or per message (a new session for every file)')
     ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight after the sending window, s')
     ap.add_argument('--strategy', default='baseline', help='path-selection strategy of the (single) group, e.g. khf:1,2, kw:2, alpha:0.5')
     ap.add_argument('--groups', default='', help='heterogeneous profiles: "name:count:mix_ms:send_ms:loop_ms:msgs_per_min:msg_bytes;..." '
@@ -58,14 +60,14 @@ ack_wait_addition_s = 10
         total = 0
         for spec in a.groups.split(';'):
             f = spec.split(':'); name, count = f[0], int(f[1]); total += count
-            cfg += f'[[group]]\nname = "{name}"\ncount = {count}\nstrategy = "{a.strategy}"\n'
+            cfg += f'[[group]]\nname = "{name}"\ncount = {count}\nstrategy = "{a.strategy}"\nsession = "{a.session}"\n'
             for k, v in zip(keys, f[2:]):
                 if v != '':
                     cfg += f'{k} = {float(v) if k == "messages_per_client_per_min" else int(v)}\n'
         if total != a.clients:
             raise SystemExit(f'group counts add up to {total}, not --clients {a.clients}')
     else:
-        cfg += f'[[group]]\nname = "mainnet"\ncount = {a.clients}\nstrategy = "{a.strategy}"\n'
+        cfg += f'[[group]]\nname = "mainnet"\ncount = {a.clients}\nstrategy = "{a.strategy}"\nsession = "{a.session}"\n'
     open(a.out, 'w').write(cfg)
     print(f'{a.out}: {a.clients} clients over gateways ' + ', '.join(str(n['node_id']) for n in chosen))
 

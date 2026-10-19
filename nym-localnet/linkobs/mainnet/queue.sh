@@ -17,17 +17,18 @@ log () { echo "[$(date -u +%m-%d\ %H:%M:%S)] $*" | tee -a "$out/queue.log"; }
 [ -f "$out/manifest.csv" ] || echo "run_id,dataset,seed,clients,verdict,delivered_pct,p50_ms,p95_ms,sent,confirmations,acks,loss_pct,connections,labelled,pcap_kept" > "$out/manifest.csv"
 
 n=0
-tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration drain strategy groups; do
+tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration drain strategy groups session; do
   n=$((n + 1)); run=$out/runs/$run_id
   [ -f "$run/verdict.json" ] && continue
   while [ -f "$out/PAUSE" ]; do sleep 30; done
   [ -f "$out/STOP" ] && { log "STOP file found: stopping"; break; }
   free=$(df -BG "$out" | awk 'NR==2 {print $4+0}')
   [ "$free" -lt "$MINFREE" ] && { log "only ${free} GB free: stopping"; break; }
-  log "$run_id $dataset seed $seed, $clients clients, $strategy"
+  log "$run_id $dataset seed $seed, $clients clients, $strategy (session ${session:-connection})"
   rm -rf "$run"
+  strategy=${strategy//+/,}                                   # "khf:1+2" in the plan = khf:1,2
   "$HERE/run_wire.sh" "$run" --seed "$seed" --clients "$clients" --duration "$duration" --drain "$drain" \
-      --strategy "$strategy" --groups "$groups" > "$run.log" 2>&1 < /dev/null
+      --strategy "$strategy" --groups "$groups" --session "${session:-connection}" > "$run.log" 2>&1 < /dev/null
   if [ ! -f "$run/clients.csv" ]; then log "   -> FAILED (see $run.log)"; sleep 60; continue; fi
   kept=0
   if [ $((n % KEEP)) -eq 0 ]; then kept=1; else rm -f "$run/capture/link.pcap"; fi
