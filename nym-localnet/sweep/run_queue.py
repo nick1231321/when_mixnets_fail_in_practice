@@ -230,15 +230,23 @@ def slice_gateway_logs(before, run_dir):
 
 
 def parse_load_test(log_path):
-    """Delivery over all files of the run (the load test reports it per group, and a heterogeneous run
-    has one group per client) and the largest per-group p95 latency."""
-    sent = delivered = 0; p95 = []
+    """Delivery over all files of the run, from messages.csv (every submitted file, received or not), and
+    the largest per-group p95 latency from the load test's summary table. The table alone is not enough:
+    a group whose files all went missing prints NaN latencies, which the row pattern does not match, so
+    its lost files would be skipped (seen on h00074: 88 % delivered, reported as 100 %)."""
+    run_dir = log_path.parent
+    delivered = None
+    if (run_dir / 'messages.csv').exists():
+        rows = list(csv.DictReader(open(run_dir / 'messages.csv')))
+        if rows:
+            delivered = round(100 * sum(1 for r in rows if r['t_received_ns']) / len(rows), 2)
+    p95 = []
     for line in log_path.read_text(errors='replace').splitlines():
         # a row of the summary table: group, sent, delivered %, p50, p95, max
         m = re.match(r'\s*(\S+)\s+(\d+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$', line)
         if m:
-            n = int(m.group(2)); sent += n; delivered += n * float(m.group(3)) / 100; p95.append(float(m.group(5)))
-    return (round(100 * delivered / sent, 2) if sent else None), (max(p95) if p95 else None)
+            p95.append(float(m.group(5)))
+    return delivered, (max(p95) if p95 else None)
 
 
 def extract_wire(cap_dir):
