@@ -43,7 +43,7 @@ def main():
         rng.shuffle(rows)
         cols = ['run_id', 'dataset', 'seed', 'clients', 'duration_s', 'drain_s', 'strategy', 'groups', 'session']
         with open(a.out, 'w', newline='') as fh:
-            w = csv.DictWriter(fh, fieldnames=cols, extrasaction='ignore'); w.writeheader(); w.writerows(rows)
+            w = csv.DictWriter(fh, fieldnames=cols, extrasaction='ignore', lineterminator='\n'); w.writeheader(); w.writerows(rows)
         print(f'{len(rows)} runs ({len(rows) // len(a.strategies.split(";"))} per strategy), '
               f'~{len(rows) * (int(rows[0]["duration_s"]) + 180) / 3600:.0f} h -> {a.out}')
         return
@@ -58,7 +58,7 @@ def main():
                          duration_s=a.duration, drain_s=a.drain, strategy='baseline', groups=groups,
                          session='connection'))
     with open(a.out, 'w', newline='') as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator='\n'); w.writeheader(); w.writerows(rows)
     print(f'{len(rows)} runs ({len(rows) // 2} homo, {len(rows) - len(rows) // 2} hetero), '
           f'{len(rows) * a.clients // 2} true pairs, ~{len(rows) * (a.duration + 180) / 3600:.0f} h -> {a.out}')
 

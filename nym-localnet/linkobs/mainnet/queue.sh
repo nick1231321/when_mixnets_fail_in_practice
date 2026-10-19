@@ -27,6 +27,7 @@ tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration dr
   log "$run_id $dataset seed $seed, $clients clients, $strategy (session ${session:-connection})"
   rm -rf "$run"
   strategy=${strategy//+/,}                                   # "khf:1+2" in the plan = khf:1,2
+  session=${session%$'\r'}; groups=${groups%$'\r'}            # a CRLF plan leaves a \r on the last field
   "$HERE/run_wire.sh" "$run" --seed "$seed" --clients "$clients" --duration "$duration" --drain "$drain" \
       --strategy "$strategy" --groups "$groups" --session "${session:-connection}" > "$run.log" 2>&1 < /dev/null
   if [ ! -f "$run/clients.csv" ]; then log "   -> FAILED (see $run.log)"; sleep 60; continue; fi
