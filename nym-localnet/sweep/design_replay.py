@@ -17,6 +17,10 @@ of a replayed run (empty for HOMO runs). Every other column is copied from the s
 
   design_replay.py --plan hetero/plan.csv --manifest hetero/main/manifest.csv --out replay/plan.csv
                    [--strategies "khf:1;khf:1,2"] [--controls 50] [--homo-runs 50]
+                   [--sets TRAIN,VAL,TEST_seen] [--first-id 0]
+The unseen-value test sets can be added as a second plan run into the same output directory:
+  design_replay.py ... --sets TEST_mu,TEST_send_in,TEST_send_out,TEST_cover,TEST_all --controls 0 --homo-runs 0
+                   --first-id 1230 --out replay/plan_unseen.csv
 """
 import argparse, csv, json, random
 
@@ -38,6 +42,8 @@ def main():
     ap.add_argument('--manifest', required=True, help='its manifest.csv (only clean runs are replayed)')
     ap.add_argument('--out', required=True)
     ap.add_argument('--strategies', default='khf:1;khf:1,2', help='strategies to replay, separated by ";"')
+    ap.add_argument('--sets', default=','.join(SEEN_SETS), help='datasets of the source plan to replay (comma-separated)')
+    ap.add_argument('--first-id', type=int, default=0, help='number of the first run id (to continue an earlier replay plan)')
     ap.add_argument('--controls', type=int, default=50, help='selected runs repeated under baseline')
     ap.add_argument('--homo-runs', type=int, default=50, help='homogeneous runs per strategy (0 = none)')
     ap.add_argument('--capacity', type=float, default=2500)
@@ -52,7 +58,7 @@ def main():
     for r in csv.DictReader(open(a.manifest)):
         status[r['run_id']] = r['status']                      # the latest attempt wins
     source = [r for r in csv.DictReader(open(a.plan))
-              if r['dataset'] in SEEN_SETS and status.get(r['run_id']) == 'clean']
+              if r['dataset'] in a.sets.split(',') and status.get(r['run_id']) == 'clean']
     rows = []
 
     def replay(src, strategy, dataset=None):
@@ -79,7 +85,7 @@ def main():
                              clients_spec=json.dumps([HOMO_PROFILE] * (2 * pairs), separators=(',', ':')),
                              source_run=''))
     rng.shuffle(rows)
-    for k, r in enumerate(rows):
+    for k, r in enumerate(rows, start=a.first_id):
         r['run_id'] = f'r{k:05d}'
     with open(a.out, 'w', newline='') as fh:
         w = csv.DictWriter(fh, fieldnames=COLS); w.writeheader(); w.writerows(rows)
