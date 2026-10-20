@@ -46,6 +46,7 @@ def main():
     ap.add_argument('--first-id', type=int, default=0, help='number of the first run id (to continue an earlier replay plan)')
     ap.add_argument('--controls', type=int, default=50, help='selected runs repeated under baseline')
     ap.add_argument('--homo-runs', type=int, default=50, help='homogeneous runs per strategy (0 = none)')
+    ap.add_argument('--no-homo-baseline', action='store_true', help='no baseline runs in the homogeneous block (already collected)')
     ap.add_argument('--capacity', type=float, default=2500)
     ap.add_argument('--clean-load', type=float, default=0.6)
     ap.add_argument('--max-pairs', type=int, default=30)
@@ -75,7 +76,7 @@ def main():
     # homogeneous block: as many default clients as fit in the budget
     budget = a.clean_load * a.capacity
     pairs = min(a.max_pairs, int(budget // (2 * client_rate(HOMO_PROFILE))))
-    for s in ['baseline'] + strategies:
+    for s in ([] if a.no_homo_baseline else ['baseline']) + strategies:
         for k in range(a.homo_runs):
             rows.append(dict(run_id='', dataset='HOMO', condition=s, strategy=s, session='message',
                              send_ms=HOMO_PROFILE[1], mu_ms=HOMO_PROFILE[0], loop_ms=HOMO_PROFILE[2],
