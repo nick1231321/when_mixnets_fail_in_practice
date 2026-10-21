@@ -20,6 +20,7 @@ def main():
     ap.add_argument('--gateways', type=int, default=2); ap.add_argument('--clients', type=int, default=10)
     ap.add_argument('--seed', type=int, default=1); ap.add_argument('--duration', type=int, default=240)
     ap.add_argument('--min-performance', type=float, default=0.95)
+    ap.add_argument('--exclude', default='', help='comma-separated node ids never to pick (gateways that refuse connections)')
     ap.add_argument('--session', choices=['connection', 'message'], default='connection',
                     help='path-selection session scope: per connection, or per message (a new session for every file)')
     ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight after the sending window, s')
@@ -28,7 +29,8 @@ def main():
                     '(empty field = client default); counts must add up to --clients')
     a = ap.parse_args()
     data = json.load(urllib.request.urlopen(NYM_API, timeout=60))['nodes']['data']
-    eligible = sorted((n for n in data if n.get('role') == 'EntryGateway' and n.get('entry')
+    excluded = {int(x) for x in a.exclude.split(',') if x}
+    eligible = sorted((n for n in data if n.get('role') == 'EntryGateway' and n.get('entry') and n['node_id'] not in excluded
                        and n['entry'].get('ws_port') and float(n.get('performance', 0)) >= a.min_performance),
                       key=lambda n: n['node_id'])
     if len(eligible) < a.gateways:

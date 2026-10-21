@@ -3,7 +3,10 @@
 #
 #   queue.sh PLAN.csv OUT_DIR            (sudo -v first: tcpdump needs it)
 #
-# A run whose OUT_DIR/runs/<run_id>/verdict.json exists is skipped, so the queue can be restarted.
+# A run whose OUT_DIR/runs/<run_id>/clients.csv exists is skipped, so the queue can be restarted and a
+# failed run (no clients.csv) is redone. OUT_DIR/exclude_gateways.txt, one node id per line, keeps
+# gateways that refuse connections out of the selection (the redone run then differs from its baseline
+# twin in its gateway pair; note it).
 # Touch OUT_DIR/PAUSE to pause between runs, OUT_DIR/STOP to stop. Each finished run is appended to
 # OUT_DIR/manifest.csv with its verdict, delivery, loss on the wire (1 - acks / confirmations) and the
 # number of labelled connections. The raw pcap (~0.5 GB per 10-client run) is kept for every
@@ -19,7 +22,7 @@ log () { echo "[$(date -u +%m-%d\ %H:%M:%S)] $*" | tee -a "$out/queue.log"; }
 n=0
 tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration drain strategy groups session; do
   n=$((n + 1)); run=$out/runs/$run_id
-  [ -f "$run/verdict.json" ] && continue
+  [ -f "$run/clients.csv" ] && continue                          # done (a failed run has no clients.csv and is redone)
   while [ -f "$out/PAUSE" ]; do sleep 30; done
   [ -f "$out/STOP" ] && { log "STOP file found: stopping"; break; }
   free=$(df -BG "$out" | awk 'NR==2 {print $4+0}')
@@ -27,9 +30,10 @@ tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration dr
   log "$run_id $dataset seed $seed, $clients clients, $strategy (session ${session:-connection})"
   rm -rf "$run"
   strategy=${strategy//+/,}                                   # "khf:1+2" in the plan = khf:1,2
+  excl=""; [ -f "$out/exclude_gateways.txt" ] && excl="--exclude $(tr '\n' ',' < "$out/exclude_gateways.txt" | sed 's/,$//')"   # gateways that refuse connections
   session=${session%$'\r'}; groups=${groups%$'\r'}            # a CRLF plan leaves a \r on the last field
   "$HERE/run_wire.sh" "$run" --seed "$seed" --clients "$clients" --duration "$duration" --drain "$drain" \
-      --strategy "$strategy" --groups "$groups" --session "${session:-connection}" > "$run.log" 2>&1 < /dev/null
+      --strategy "$strategy" --groups "$groups" --session "${session:-connection}" $excl > "$run.log" 2>&1 < /dev/null
   if [ ! -f "$run/clients.csv" ]; then log "   -> FAILED (see $run.log)"; sleep 60; continue; fi
   kept=0
   if [ $((n % KEEP)) -eq 0 ]; then kept=1; else rm -f "$run/capture/link.pcap"; fi
