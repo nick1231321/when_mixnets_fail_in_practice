@@ -243,11 +243,19 @@ impl Prng {
 struct Plan {
     partner: Vec<Option<usize>>,
     gateway: Vec<usize>,
+    /// Per client: a seed shared by the two members of a pair whose submissions must coincide
+    /// (`random-pairs-sync`); both then draw the same gaps and follow the same absolute schedule.
+    sync_seed: Vec<Option<u64>>,
+    /// Every message goes to a recipient drawn anew among the other clients (`random-recipient`);
+    /// `partner` is then only a placeholder that marks the client as a sender.
+    random_recipient: bool,
 }
 
 fn plan(pairing: &str, clients: usize, gateways: usize, rng: &mut Prng) -> Result<Plan, String> {
     let mut partner = vec![None; clients];
     let mut gateway = vec![0; clients];
+    let mut sync_seed = vec![None; clients];
+    let mut random_recipient = false;
     let other = |g: usize| (g + 1) % gateways.max(1);
     match pairing {
         // shuffled pairs that send to each other, on different gateways
@@ -302,13 +310,46 @@ fn plan(pairing: &str, clients: usize, gateways: usize, rng: &mut Prng) -> Resul
                 gateway[i] = i % gateways.max(1);
             }
         }
+        // shuffled pairs as in random-pairs, but only the first member of each pair sends
+        // (one side sends, the other only receives), or both send at the same moments
+        "random-pairs-oneway" | "random-pairs-sync" => {
+            let sync = pairing == "random-pairs-sync";
+            let mut order: Vec<usize> = (0..clients).collect();
+            rng.shuffle(&mut order);
+            for (k, pair) in order.chunks(2).enumerate() {
+                match *pair {
+                    [a, b] => {
+                        partner[a] = Some(b);
+                        gateway[a] = 0;
+                        gateway[b] = other(0);
+                        if sync {
+                            partner[b] = Some(a);
+                            // the same seed on both sides gives both the same submission times
+                            sync_seed[a] = Some((k as u64 + 1) << 40);
+                            sync_seed[b] = Some((k as u64 + 1) << 40);
+                        }
+                    }
+                    [a] => partner[a] = Some(order[0]),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        // every client sends, and every message goes to a client drawn anew among the others
+        "random-recipient" => {
+            for i in 0..clients {
+                partner[i] = Some((i + 1) % clients);
+                gateway[i] = i % gateways.max(1);
+            }
+            random_recipient = true;
+        }
         other => {
             return Err(format!(
-                "invalid pairing '{other}' (expected random-pairs, split-pairs, ring, many-to-one or self)"
+                "invalid pairing '{other}' (expected random-pairs, random-pairs-oneway, random-pairs-sync, \
+                 random-recipient, split-pairs, ring, many-to-one or self)"
             ))
         }
     }
-    Ok(Plan { partner, gateway })
+    Ok(Plan { partner, gateway, sync_seed, random_recipient })
 }
 
 struct SentMessage {
@@ -627,13 +668,17 @@ async fn load_test(config: Config) -> Result<(), String> {
             let group = &groups[client_group[index]];
             let mean_gap_s = 60.0 / group.rate_per_min;
             let sender = connected.client.split_sender();
-            let destination = addresses[partner];
+            let addresses = addresses.clone();
             let size = group.message_size;
-            let mut rng = Prng(config.seed ^ ((index as u64 + 1) << 32));
+            let sync_seed = plan.sync_seed[index];
+            let random_recipient = plan.random_recipient;
+            // a synchronised pair shares one seed, so both members draw the same gaps
+            let mut rng = Prng(config.seed ^ sync_seed.unwrap_or((index as u64 + 1) << 32));
             senders.spawn(async move {
                 let mut sent = Vec::new();
                 let mut abandoned = 0usize;
                 let mut sequence = 0u64;
+                let mut next_at = t_start;
                 loop {
                     let gap = Duration::from_secs_f64(rng.exponential(mean_gap_s));
                     // never sleep past the end of sending: a very low rate (e.g. a cover-only
@@ -642,14 +687,30 @@ async fn load_test(config: Config) -> Result<(), String> {
                     if now >= send_until {
                         break;
                     }
+                    let wait = if sync_seed.is_some() {
+                        // absolute schedule from the shared gaps, so the two submissions of a
+                        // pair coincide whatever each side's previous send took
+                        next_at += gap.as_nanos() as u64;
+                        Duration::from_nanos(next_at.saturating_sub(now))
+                    } else {
+                        gap
+                    };
                     let remaining = Duration::from_nanos(send_until.saturating_sub(now));
-                    tokio::time::sleep(gap.min(remaining)).await;
+                    tokio::time::sleep(wait.min(remaining)).await;
                     let now = instrumentation::now_ns();
                     if now >= send_until {
                         break;
                     }
                     let id = ((index as u64) << 32) | sequence;
                     sequence += 1;
+                    let recipient = if random_recipient {
+                        // any other client, drawn anew for every message
+                        let r = (rng.next_u64() % (addresses.len() as u64 - 1)) as usize;
+                        if r >= index { r + 1 } else { r }
+                    } else {
+                        partner
+                    };
+                    let destination = addresses[recipient];
                     let t_submit_ns = instrumentation::now_ns();
                     let message = payload(id, index, size, t_submit_ns);
                     // a client that cannot keep up stops accepting messages; give up on a
@@ -674,7 +735,7 @@ async fn load_test(config: Config) -> Result<(), String> {
                     sent.push(SentMessage {
                         id,
                         sender: index,
-                        receiver: partner,
+                        receiver: recipient,
                         t_submit_ns,
                         size,
                     });
@@ -792,7 +853,11 @@ fn write_clients(
     );
     for (index, address) in addresses.iter().enumerate() {
         let group = &groups[client_group[index]];
-        let partner = plan.partner[index].map_or(String::new(), |p| p.to_string());
+        let partner = if plan.random_recipient {
+            "any".to_string()
+        } else {
+            plan.partner[index].map_or(String::new(), |p| p.to_string())
+        };
         let _ = writeln!(
             csv,
             "{index},\"{}\",\"{}\",{},{},{},{},{},{},{partner},{},{},{},{},{address}",

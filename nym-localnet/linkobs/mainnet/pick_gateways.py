@@ -25,6 +25,10 @@ def main():
                     help='path-selection session scope: per connection, or per message (a new session for every file)')
     ap.add_argument('--drain', type=int, default=60, help='max wait for files still in flight after the sending window, s')
     ap.add_argument('--strategy', default='baseline', help='path-selection strategy of the (single) group, e.g. khf:1,2, kw:2, alpha:0.5')
+    ap.add_argument('--pairing', default='random-pairs',
+                    choices=['random-pairs', 'random-pairs-oneway', 'random-pairs-sync', 'random-recipient', 'many-to-one', 'ring'],
+                    help='who sends to whom: shuffled pairs with both sides sending (default), with one side sending, '
+                         'with both sides submitting at the same moments, or a recipient drawn anew for every message')
     ap.add_argument('--groups', default='', help='heterogeneous profiles: "name:count:mix_ms:send_ms:loop_ms:msgs_per_min:msg_bytes;..." '
                     '(empty field = client default); counts must add up to --clients')
     a = ap.parse_args()
@@ -49,7 +53,7 @@ warmup_s = 5
 drain_s = {a.drain}
 message_size = 50000
 messages_per_client_per_min = 6.0
-pairing = "random-pairs"
+pairing = "{a.pairing}"
 seed = {a.seed}
 [client]
 loop_cover_traffic = true

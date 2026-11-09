@@ -3,6 +3,10 @@
 #
 #   queue.sh PLAN.csv OUT_DIR            (sudo -v first: tcpdump needs it)
 #
+# The plan's optional last two columns are the pairing mode (random-pairs, random-pairs-oneway,
+# random-pairs-sync, random-recipient) and the clients hidden from the adversary ("3;7"), which the
+# queue writes to OUT_DIR/runs/<run_id>/hidden.txt for the analysis; both may be empty (old plans).
+#
 # A run whose OUT_DIR/runs/<run_id>/clients.csv exists is skipped, so the queue can be restarted and a
 # failed run (no clients.csv) is redone. OUT_DIR/exclude_gateways.txt, one node id per line, keeps
 # gateways that refuse connections out of the selection (the redone run then differs from its baseline
@@ -17,10 +21,10 @@ plan=${1:?PLAN.csv}; out=${2:?OUT_DIR}; mkdir -p "$out/runs"
 HERE=$(cd "$(dirname "$0")" && pwd)
 KEEP=${KEEP_PCAP_EVERY:-5}; MINFREE=${MIN_FREE_GB:-5}
 log () { echo "[$(date -u +%m-%d\ %H:%M:%S)] $*" | tee -a "$out/queue.log"; }
-[ -f "$out/manifest.csv" ] || echo "run_id,dataset,seed,clients,verdict,delivered_pct,p50_ms,p95_ms,sent,confirmations,acks,loss_pct,connections,labelled,pcap_kept" > "$out/manifest.csv"
+[ -f "$out/manifest.csv" ] || echo "run_id,dataset,seed,clients,verdict,delivered_pct,p50_ms,p95_ms,sent,confirmations,acks,loss_pct,connections,labelled,pcap_kept,pairing,hidden" > "$out/manifest.csv"
 
 n=0
-tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration drain strategy groups session; do
+tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration drain strategy groups session pairing hidden; do
   n=$((n + 1)); run=$out/runs/$run_id
   [ -f "$run/clients.csv" ] && continue                          # done (a failed run has no clients.csv and is redone)
   while [ -f "$out/PAUSE" ]; do sleep 30; done
@@ -31,10 +35,12 @@ tail -n +2 "$plan" | while IFS=, read -r run_id dataset seed clients duration dr
   rm -rf "$run"
   strategy=${strategy//+/,}                                   # "khf:1+2" in the plan = khf:1,2
   excl=""; [ -f "$out/exclude_gateways.txt" ] && excl="--exclude $(tr '\n' ',' < "$out/exclude_gateways.txt" | sed 's/,$//')"   # gateways that refuse connections
-  session=${session%$'\r'}; groups=${groups%$'\r'}            # a CRLF plan leaves a \r on the last field
+  session=${session%$'\r'}; groups=${groups%$'\r'}; pairing=${pairing%$'\r'}; hidden=${hidden%$'\r'}   # a CRLF plan leaves a \r on the last field
   "$HERE/run_wire.sh" "$run" --seed "$seed" --clients "$clients" --duration "$duration" --drain "$drain" \
-      --strategy "$strategy" --groups "$groups" --session "${session:-connection}" $excl > "$run.log" 2>&1 < /dev/null
+      --strategy "$strategy" --groups "$groups" --session "${session:-connection}" --pairing "${pairing:-random-pairs}" $excl > "$run.log" 2>&1 < /dev/null
   if [ ! -f "$run/clients.csv" ]; then log "   -> FAILED (see $run.log)"; sleep 60; continue; fi
+  # the clients marked in the plan as outside the endpoint set ("3;7"): their links are withheld at analysis time
+  echo "${hidden}" | tr ';' '\n' | sed '/^$/d' > "$run/hidden.txt"
   kept=0
   if [ $((n % KEEP)) -eq 0 ]; then kept=1; else rm -f "$run/capture/link.pcap"; fi
   summary=$(python3 - "$run" <<'EOF'
@@ -53,7 +59,7 @@ except Exception:
 print(f'{v},{deliv},{p50},{p95},{sent},{conf},{ack},{loss},{f.conn.nunique()},{lab}')
 EOF
 )
-  echo "$run_id,$dataset,$seed,$clients,$summary,$kept" >> "$out/manifest.csv"
+  echo "$run_id,$dataset,$seed,$clients,$summary,$kept,${pairing:-random-pairs},${hidden}" >> "$out/manifest.csv"
   log "   -> $(echo "$summary" | cut -d, -f1): delivered $(echo "$summary" | cut -d, -f2)%, loss $(echo "$summary" | cut -d, -f8)%, $(echo "$summary" | cut -d, -f10) labelled connections"
 done
 log "queue finished"
